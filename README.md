@@ -1,10 +1,10 @@
-# DuckLake WASM
+# In-Browser DuckDB
 
 A high-performance geospatial visualization tool that renders millions of AIS ship position reports using WebAssembly-accelerated density raster tiles.
 
 ## What It Does
 
-DuckLake WASM loads a large Parquet file containing AIS (Automatic Identification System) ship position data and visualizes it on an interactive map. It uses a hybrid rendering approach:
+In-Browser DuckDB loads a large Parquet file containing AIS (Automatic Identification System) ship position data and visualizes it on an interactive map. It uses a hybrid rendering approach:
 
 - **Aggregate density tiles** (zoom levels 0–20): Renders point density as Datashader-style raster tiles computed in Rust/WASM. Fractional zoom levels round up to the next whole zoom, with higher-zoom tiles layered on top for better resolution.
 - **Ship circles** (zoom 8+): Shows individual ship positions as GPU-instanced circles with white borders, color-coded by speed.
