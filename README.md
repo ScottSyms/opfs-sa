@@ -59,6 +59,10 @@ In-Browser DuckDB fetches a Parquet file (e.g., AIS ship position data) once and
 - **Sandboxed** — isolated per origin, no cross-site access
 - **Large files** — handles multi-gigabyte Parquet files that would exceed `localStorage` or `IndexedDB` limits
 
+### Remote HTTP Fallback
+
+If the Parquet file cannot be downloaded to OPFS (e.g., CORS restrictions, no OPFS support, or network issues), the app automatically falls back to querying the remote file directly over HTTP. All in-memory tables (`ais_position_points`, `ais_latest_positions`, `ais_track_points`) are still built, so the density tiles and ship tracks work identically. The tradeoff is slower initial load and no persistence across page reloads.
+
 ## Building
 
 ### Prerequisites

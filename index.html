@@ -1947,21 +1947,37 @@
           }
         });
 
-        setStatus(`Fetching ${SOURCE_URL}...`);
-        const fileHandle = await fetchToOPFS(SOURCE_URL, OPFS_FILE_NAME);
-        await db.registerFileHandle(OPFS_FILE_NAME, fileHandle, duckdb.DuckDBDataProtocol.BROWSER_FSACCESS, true);
+        let dataMode = "opfs";
+        let fileHandle = null;
 
-        conn = await db.connect();
-        await conn.query(`CREATE OR REPLACE VIEW test_parquet AS SELECT * FROM '${OPFS_FILE_NAME}';`);
+        try {
+          setStatus(`Fetching ${SOURCE_URL} to OPFS...`);
+          fileHandle = await fetchToOPFS(SOURCE_URL, OPFS_FILE_NAME);
+          await db.registerFileHandle(OPFS_FILE_NAME, fileHandle, duckdb.DuckDBDataProtocol.BROWSER_FSACCESS, true);
+          conn = await db.connect();
+          await conn.query(`CREATE OR REPLACE VIEW test_parquet AS SELECT * FROM '${OPFS_FILE_NAME}';`);
+        } catch (opfsError) {
+          console.warn("OPFS fetch failed, falling back to remote HTTP:", opfsError);
+          dataMode = "remote";
+          conn = await db.connect();
+          await conn.query(`CREATE OR REPLACE VIEW test_parquet AS SELECT * FROM '${SOURCE_URL}';`);
+        }
+
         await prepareAisSpatialData();
 
         window.duckdbWasm = db;
-        window.testParquetOPFSHandle = fileHandle;
+        if (fileHandle) window.testParquetOPFSHandle = fileHandle;
 
         runButton.disabled = false;
-        setStatus(
-          `Ready. ${OPFS_FILE_NAME} is stored in OPFS; ${validPositionReportCount.toLocaleString()} AIS reports and ${latestShipCount.toLocaleString()} latest ship positions are prepared.`,
-        );
+        if (dataMode === "opfs") {
+          setStatus(
+            `Ready. ${OPFS_FILE_NAME} is stored in OPFS; ${validPositionReportCount.toLocaleString()} AIS reports and ${latestShipCount.toLocaleString()} latest ship positions are prepared.`,
+          );
+        } else {
+          setStatus(
+            `Ready. Running from remote ${SOURCE_URL}; ${validPositionReportCount.toLocaleString()} AIS reports and ${latestShipCount.toLocaleString()} latest ship positions are prepared. Data is not cached locally.`,
+          );
+        }
         setResults("Ready. Run the default query or enter your own SQL against test_parquet or 'test.parquet'. Aggregate zooms use dynamic raster density tiles; close zooms use viewport ship circles.");
         requestViewportRender(0);
       } catch (error) {
