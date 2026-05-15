@@ -43,12 +43,13 @@ In-Browser DuckDB fetches a Parquet file (e.g., AIS ship position data) once and
 
 1. Parquet file fetched once from a URL and persisted in the browser's **OPFS** (Origin Private File System)
 2. DuckDB-WASM registers the OPFS file and runs SQL queries entirely locally — no server round-trips
-3. Coordinates copied to WASM memory via `load_points`
-4. Spatial index built during load (~512×512 grid)
-5. On pan/zoom, visible tile coordinates calculated
-6. Tile render requests sent to Web Worker
-7. Worker calls `render_tile` in WASM, returns RGBA data
-8. deck.gl `BitmapLayer` renders tiles with crossfade transitions
+3. **Single Arrow-to-WASM transfer** — at initialization, `SELECT latitude, longitude FROM ais_position_points` produces one Arrow table. The two columns are copied into `Float64Array`s, transferred (zero-copy via `Transferable`) to the Web Worker, and loaded into WASM memory via `load_points`. This happens exactly once.
+4. WASM builds a 512×512 uniform grid spatial index on that single copy of ~9.7M points
+5. All subsequent tile rendering reads exclusively from the in-WASM `PointStore` — no more Arrow tables, no more DuckDB queries, no more JS allocations
+6. On pan/zoom, visible tile coordinates calculated
+7. Tile render requests sent to Web Worker
+8. Worker calls `render_tile` in WASM, returns RGBA data
+9. deck.gl `BitmapLayer` renders tiles with crossfade transitions
 
 ### Why OPFS?
 
