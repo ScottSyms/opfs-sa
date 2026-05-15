@@ -1,0 +1,1653 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DuckDB-WASM OPFS Parquet Query</title>
+    <link href="https://api.tiles.mapbox.com/mapbox-gl-js/v1.13.0/mapbox-gl.css" rel="stylesheet" />
+    <link href="https://unpkg.com/maplibre-gl@^3/dist/maplibre-gl.css" rel="stylesheet" />
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+        background: #1f1f1f;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+      }
+
+      body {
+        display: grid;
+        grid-template-rows: auto 1fr;
+        background: #1f1f1f;
+        color: #f5f5f5;
+      }
+
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 12px 16px;
+        border-bottom: 1px solid #343434;
+        background: #151515;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 14px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+      }
+
+      #status {
+        overflow: hidden;
+        color: #bdbdbd;
+        font-size: 12px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      main {
+        width: 100%;
+        min-width: 0;
+        min-height: 0;
+        overflow: auto;
+        padding: 16px;
+      }
+
+      .query-panel {
+        display: grid;
+        gap: 12px;
+        max-width: 1200px;
+        margin: 0 auto;
+      }
+
+      label {
+        color: #d8d8d8;
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      .map-panel {
+        display: grid;
+        gap: 8px;
+      }
+
+      .panel-heading {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 12px;
+        min-width: 0;
+      }
+
+      #map-status {
+        overflow: hidden;
+        color: #bdbdbd;
+        font-size: 12px;
+        text-align: right;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .map-status-group {
+        display: flex;
+        align-items: baseline;
+        justify-content: flex-end;
+        gap: 10px;
+        min-width: 0;
+      }
+
+      .opacity-control {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        color: #bdbdbd;
+        font-size: 12px;
+        font-weight: 400;
+        white-space: nowrap;
+      }
+
+      .opacity-control input {
+        width: 96px;
+        accent-color: #ff35a0;
+      }
+
+      #aggregate-opacity-value {
+        min-width: 4ch;
+        color: #f5f5f5;
+        font-variant-numeric: tabular-nums;
+      }
+
+      #zoom-status {
+        color: #8ab4f8;
+        font-size: 12px;
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
+
+      #map {
+        position: relative;
+        overflow: hidden;
+        width: 100%;
+        min-height: 360px;
+        height: min(48vh, 520px);
+        border: 1px solid #343434;
+        border-radius: 8px;
+        background: #0e1117;
+      }
+
+      #map-renderer,
+      #deck-renderer,
+      #kepler-renderer {
+        position: absolute;
+        inset: 0;
+      }
+
+      #map-renderer {
+        z-index: 1;
+      }
+
+      #deck-renderer {
+        z-index: 2;
+        pointer-events: none;
+      }
+
+      #deck-renderer canvas {
+        display: block;
+      }
+
+      #kepler-renderer {
+        z-index: 0;
+        display: none;
+      }
+
+      textarea {
+        width: 100%;
+        min-height: 120px;
+        resize: vertical;
+        padding: 12px;
+        border: 1px solid #4a4a4a;
+        border-radius: 8px;
+        outline: none;
+        background: #121212;
+        color: #f5f5f5;
+        font: inherit;
+        line-height: 1.45;
+      }
+
+      textarea:focus {
+        border-color: #8ab4f8;
+        box-shadow: 0 0 0 2px rgb(138 180 248 / 20%);
+      }
+
+      .actions {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+
+      button {
+        border: 0;
+        border-radius: 8px;
+        padding: 10px 16px;
+        background: #8ab4f8;
+        color: #101010;
+        cursor: pointer;
+        font: inherit;
+        font-weight: 700;
+      }
+
+      button:disabled {
+        cursor: not-allowed;
+        opacity: 0.55;
+      }
+
+      #timing {
+        color: #bdbdbd;
+        font-size: 12px;
+      }
+
+      #results {
+        overflow: auto;
+        min-height: 180px;
+        border: 1px solid #343434;
+        border-radius: 8px;
+        background: #121212;
+      }
+
+      .message {
+        margin: 0;
+        padding: 14px;
+        color: #cfcfcf;
+        white-space: pre-wrap;
+      }
+
+      .error {
+        color: #ffb4ab;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12px;
+      }
+
+      th,
+      td {
+        max-width: 480px;
+        padding: 8px 10px;
+        border-bottom: 1px solid #2b2b2b;
+        text-align: left;
+        vertical-align: top;
+        white-space: nowrap;
+      }
+
+      th {
+        position: sticky;
+        top: 0;
+        background: #202020;
+        color: #f0f0f0;
+      }
+
+      td {
+        overflow: hidden;
+        color: #e8e8e8;
+        text-overflow: ellipsis;
+      }
+
+      @media (max-width: 720px) {
+        .panel-heading {
+          align-items: flex-start;
+          flex-direction: column;
+          gap: 4px;
+        }
+
+        #map-status {
+          width: 100%;
+          text-align: left;
+          white-space: normal;
+        }
+
+        .map-status-group {
+          align-items: flex-start;
+          flex-direction: column;
+          gap: 2px;
+          width: 100%;
+        }
+
+        #map {
+          min-height: 320px;
+          height: 48vh;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>DuckDB-WASM OPFS Parquet Query</h1>
+      <div id="status">Loading DuckDB-WASM...</div>
+    </header>
+    <main>
+      <section class="query-panel">
+        <div class="map-panel">
+          <div class="panel-heading">
+            <label>Map output</label>
+            <div class="map-status-group">
+              <label class="opacity-control" for="aggregate-opacity">
+                Aggregate opacity
+                <input id="aggregate-opacity" type="range" min="0" max="100" value="50" />
+                <span id="aggregate-opacity-value">50%</span>
+              </label>
+              <span id="zoom-status">Zoom --</span>
+              <span id="map-status">Run a query with latitude and longitude columns to map points.</span>
+            </div>
+          </div>
+          <div id="map">
+            <div id="map-renderer"></div>
+            <div id="deck-renderer"></div>
+            <div id="kepler-renderer"></div>
+          </div>
+        </div>
+        <label for="query">Query local OPFS parquet file <code>test.parquet</code></label>
+        <textarea id="query" spellcheck="false">SELECT mmsi, latitude, longitude, name, ship_type, navigation_status FROM test_parquet LIMIT 100;</textarea>
+        <div class="actions">
+          <button id="run" type="button" disabled>Run Query</button>
+          <div id="timing">No query run yet.</div>
+        </div>
+        <div id="results"><p class="message">Initializing...</p></div>
+      </section>
+    </main>
+
+    <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/redux@4.2.1/dist/redux.js" crossorigin></script>
+    <script src="https://unpkg.com/react-redux@8.1.2/dist/react-redux.min.js" crossorigin></script>
+    <script src="https://unpkg.com/styled-components@6.1.8/dist/styled-components.min.js" crossorigin></script>
+    <script src="https://unpkg.com/maplibre-gl@3/dist/maplibre-gl.js"></script>
+    <script src="https://unpkg.com/deck.gl@8.9.36/dist.min.js"></script>
+    <script src="https://unpkg.com/kepler.gl@3.1.10/umd/keplergl.min.js"></script>
+
+    <script type="module">
+      const DUCKDB_WASM_VERSION = "1.33.1-dev45.0";
+      const SOURCE_URL = "http://localhost:8080/test.parquet";
+      const OPFS_FILE_NAME = "test.parquet";
+      const KEPLER_MAP_ID = "query-map";
+      const KEPLER_DATA_ID = "query-result";
+      const MAX_TABLE_ROWS = 100;
+      const MAX_QUERY_PREVIEW_ROWS = 5000;
+      const MAX_KEPLER_ROWS = 5000;
+      const MAX_INDIVIDUAL_SHIPS = 30000;
+      const VIEWPORT_PADDING_RATIO = 0.18;
+      const VIEWPORT_RENDER_DEBOUNCE_MS = 120;
+      const SHIP_GLYPH_MIN_ZOOM = 8;
+      const DENSITY_TILE_SIZE = 512;
+      const DENSITY_TILE_MAX_ZOOM = 20;
+      const DENSITY_TILE_BUFFER = 1;
+      const DENSITY_TILE_CACHE_LIMIT = 256;
+      const DENSITY_TILE_FADE_MS = 220;
+      const DENSITY_TILE_READY_THRESHOLD = 0.8;
+      const DENSITY_TILE_MAX_HOLD_MS = 800;
+      const DENSITY_TILE_PARENT_FALLBACK_DEPTH = 2;
+      const MERCATOR_MAX_LATITUDE = 85.05112878;
+      const HEXBIN_SCREEN_RADIUS_PX = 12;
+      const MIN_HEXBIN_RADIUS_METERS = 100;
+      const MAX_HEXBIN_RADIUS_METERS = 250_000;
+      const MAP_STYLE_ID = "carto-voyager";
+      const MAP_STYLES = {
+        [MAP_STYLE_ID]: {
+          id: MAP_STYLE_ID,
+          label: "Carto Voyager",
+          url: "https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json",
+          icon: "https://carto.com/help/images/building-maps/basemaps/voyager.png",
+        },
+      };
+
+      const status = document.querySelector("#status");
+      const mapElement = document.querySelector("#map");
+      const mapRenderer = document.querySelector("#map-renderer");
+      const deckRenderer = document.querySelector("#deck-renderer");
+      const keplerRenderer = document.querySelector("#kepler-renderer");
+      const aggregateOpacityInput = document.querySelector("#aggregate-opacity");
+      const aggregateOpacityValue = document.querySelector("#aggregate-opacity-value");
+      const zoomStatus = document.querySelector("#zoom-status");
+      const mapStatus = document.querySelector("#map-status");
+      const queryInput = document.querySelector("#query");
+      const runButton = document.querySelector("#run");
+      const timing = document.querySelector("#timing");
+      const results = document.querySelector("#results");
+
+      let conn;
+      let activeRun = 0;
+      let keplerStore;
+      let keplerRoot;
+      let keplerDatasetVersion = 0;
+      let mapLibreMap;
+      let mapDeckOverlay;
+      let deckInstance;
+      let aisSpatialReady = false;
+      let viewportRenderRun = 0;
+      let viewportRenderTimer;
+      let latestShipCount = 0;
+      let validPositionReportCount = 0;
+      let aggregateOpacity = Number(aggregateOpacityInput.value) / 100;
+      let activeViewportMode = "tiles";
+      let currentViewportShipRows = [];
+      let densityTileRenderVersion = 0;
+      let densityTileRedrawFrame = 0;
+      let densityTileTransitionFrame = 0;
+      let densityTileTransitionStart = 0;
+      let densityTileTransitionStartedAt = 0;
+      let densityTilePreviousKeys = [];
+      let densityTileTargetRequests = [];
+      let densityTileTargetKeys = [];
+      let densityTileDisplayedKeys = [];
+      const densityTileCache = new Map();
+      const densityTileGenerations = new Map();
+      const densityTileRequests = new Map();
+      let currentHexbinPoints = [];
+      let currentHexbinLabel = "";
+
+      function setStatus(message) {
+        status.textContent = message;
+      }
+
+      function setMapStatus(message) {
+        mapStatus.textContent = message;
+      }
+
+      function updateZoomStatus() {
+        zoomStatus.textContent = mapLibreMap ? `Zoom ${mapLibreMap.getZoom().toFixed(2)}` : "Zoom --";
+      }
+
+      function updateAggregateOpacityStatus() {
+        aggregateOpacityValue.textContent = `${Math.round(aggregateOpacity * 100)}%`;
+      }
+
+      function setResults(message, className = "message") {
+        results.replaceChildren();
+        const element = document.createElement("p");
+        element.className = className;
+        element.textContent = message;
+        results.append(element);
+      }
+
+      function initializeMapRenderer() {
+        const { maplibregl, deck } = window;
+        if (!maplibregl || !deck) {
+          throw new Error("MapLibre/deck.gl dependencies did not load.");
+        }
+
+        mapLibreMap = new maplibregl.Map({
+          container: mapRenderer,
+          style: MAP_STYLES[MAP_STYLE_ID].url,
+          center: [0, 20],
+          zoom: 1.25,
+          attributionControl: true,
+        });
+        mapLibreMap.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+        mapLibreMap.on("error", (event) => {
+          const message = event?.error?.message ?? "Map renderer error.";
+          setMapStatus(message);
+          console.error(event?.error ?? event);
+        });
+
+        if (typeof deck.MapboxOverlay === "function") {
+          mapDeckOverlay = new deck.MapboxOverlay({ interleaved: true, layers: [] });
+          mapLibreMap.addControl(mapDeckOverlay);
+        } else {
+          deckInstance = new deck.Deck({
+            parent: deckRenderer,
+            controller: false,
+            layers: [],
+            views: [new deck.MapView({ repeat: true })],
+            viewState: getMapViewState(),
+          });
+        }
+
+        const syncDeckView = () => {
+          updateZoomStatus();
+          if (deckInstance) deckInstance.setProps({ viewState: getMapViewState() });
+        };
+        mapLibreMap.on("load", () => {
+          syncDeckView();
+          requestViewportRender(0);
+        });
+        mapLibreMap.on("move", syncDeckView);
+        mapLibreMap.on("moveend", () => requestViewportRender());
+        mapLibreMap.on("zoomend", () => requestViewportRender());
+        new ResizeObserver(() => {
+          if (deckInstance) deckInstance.setProps({ width: deckRenderer.clientWidth, height: deckRenderer.clientHeight });
+          syncDeckView();
+          requestViewportRender();
+        }).observe(deckRenderer);
+      }
+
+      function getMapViewState() {
+        if (!mapLibreMap) {
+          return { longitude: 0, latitude: 20, zoom: 1.25, bearing: 0, pitch: 0 };
+        }
+        const center = mapLibreMap.getCenter();
+        return {
+          longitude: center.lng,
+          latitude: center.lat,
+          zoom: mapLibreMap.getZoom(),
+          bearing: mapLibreMap.getBearing(),
+          pitch: mapLibreMap.getPitch(),
+        };
+      }
+
+      function hasDeckRenderer() {
+        return Boolean(mapDeckOverlay || deckInstance);
+      }
+
+      function setDeckLayers(layers, props = {}) {
+        if (mapDeckOverlay) {
+          mapDeckOverlay.setProps({ ...props, layers });
+          return;
+        }
+        if (deckInstance) {
+          deckInstance.setProps({ ...props, viewState: getMapViewState(), layers });
+        }
+      }
+
+      function initializeKeplerMap() {
+        const { React, ReactDOM, ReactRedux, Redux, KeplerGl } = window;
+        if (!React || !ReactDOM || !ReactRedux || !Redux || !KeplerGl) {
+          throw new Error("Kepler.gl dependencies did not load.");
+        }
+
+        const keplerReducer = KeplerGl.keplerGlReducer.initialState({
+          mapState: {
+            latitude: 20,
+            longitude: 0,
+            zoom: 1.25,
+            bearing: 0,
+            pitch: 0,
+          },
+          mapStyle: {
+            mapStyles: MAP_STYLES,
+            styleType: MAP_STYLE_ID,
+          },
+          uiState: {
+            readOnly: true,
+            currentModal: null,
+          },
+        });
+        const reducer = Redux.combineReducers({ keplerGl: keplerReducer });
+        const middleware = KeplerGl.enhanceReduxMiddleware([]);
+        keplerStore = Redux.createStore(reducer, {}, Redux.compose(Redux.applyMiddleware(...middleware)));
+        keplerRoot = ReactDOM.createRoot(keplerRenderer);
+
+        const render = () => {
+          const rect = keplerRenderer.getBoundingClientRect();
+          const width = Math.max(320, Math.floor(rect.width));
+          const height = Math.max(320, Math.floor(rect.height));
+          const keplerMap = React.createElement(KeplerGl.KeplerGl, {
+            id: KEPLER_MAP_ID,
+            width,
+            height,
+            appName: "DuckDB Query Map",
+            version: "",
+            mapboxApiAccessToken: "",
+            theme: "dark",
+          });
+
+          const mapContainer = React.createElement(
+            "div",
+            { style: { position: "absolute", inset: 0, width: "100%", height: "100%" } },
+            keplerMap,
+          );
+
+          keplerRoot.render(React.createElement(ReactRedux.Provider, { store: keplerStore }, mapContainer));
+        };
+
+        render();
+        new ResizeObserver(render).observe(keplerRenderer);
+        setMapStatus("Run a query with latitude and longitude columns to map points.");
+      }
+
+      try {
+        initializeMapRenderer();
+      } catch (error) {
+        console.error(error);
+        setMapStatus(error?.message ?? String(error));
+        setResults(error?.message ?? String(error), "message error");
+      }
+
+      try {
+        initializeKeplerMap();
+      } catch (error) {
+        console.error(error);
+        setMapStatus(`Kepler did not initialize; using MapLibre/deck renderer. ${error?.message ?? String(error)}`);
+      }
+
+      async function createDatabase(duckdb, progress) {
+        const bundles = duckdb.getJsDelivrBundles();
+        const bundle = await duckdb.selectBundle(bundles);
+        const workerUrl = URL.createObjectURL(
+          new Blob([`importScripts("${bundle.mainWorker}");`], { type: "text/javascript" }),
+        );
+
+        const worker = new Worker(workerUrl);
+        const db = new duckdb.AsyncDuckDB(new duckdb.ConsoleLogger(), worker);
+        await db.instantiate(bundle.mainModule, bundle.pthreadWorker, progress);
+        URL.revokeObjectURL(workerUrl);
+        return db;
+      }
+
+      async function fetchToOPFS(url, fileName) {
+        if (!navigator.storage?.getDirectory) {
+          throw new Error("OPFS is not available in this browser.");
+        }
+
+        const response = await fetch(url);
+        if (!response.ok) {
+          throw new Error(`Failed to fetch ${url}: ${response.status} ${response.statusText}`);
+        }
+
+        const root = await navigator.storage.getDirectory();
+        const fileHandle = await root.getFileHandle(fileName, { create: true });
+        const writable = await fileHandle.createWritable();
+        if (response.body) {
+          await response.body.pipeTo(writable);
+        } else {
+          await writable.write(await response.arrayBuffer());
+          await writable.close();
+        }
+
+        return fileHandle;
+      }
+
+      function stringifyCell(value) {
+        if (value === null || value === undefined) return "";
+        if (typeof value === "bigint") return value.toString();
+        if (value instanceof Date) return value.toISOString();
+        if (value instanceof Uint8Array) return `[${value.length} bytes]`;
+        if (typeof value === "object") {
+          return JSON.stringify(value, (_key, nestedValue) =>
+            typeof nestedValue === "bigint" ? nestedValue.toString() : nestedValue,
+          );
+        }
+        return String(value);
+      }
+
+      function rowToObject(row, fields) {
+        if (typeof row?.toJSON === "function") return row.toJSON();
+        return Object.fromEntries(fields.map((field, index) => [field.name, row[field.name] ?? row[index]]));
+      }
+
+      function tableToObjects(table, fields, limit = Infinity) {
+        const boundedTable = Number.isFinite(limit) && typeof table.slice === "function" ? table.slice(0, limit) : table;
+        return boundedTable
+          .toArray()
+          .slice(0, limit)
+          .map((row) => rowToObject(row, fields));
+      }
+
+      function getQueryResult(table) {
+        const fields = table.schema.fields;
+        const rowCount = table.numRows ?? table.length ?? 0;
+        const rows = tableToObjects(table, fields, MAX_QUERY_PREVIEW_ROWS);
+        return { fields, rows, rowCount, previewRowCount: rows.length, truncated: rowCount > rows.length };
+      }
+
+      function normalizeFieldName(name) {
+        return name.toLowerCase().replace(/[^a-z0-9]/g, "");
+      }
+
+      function findCoordinateFields(fields) {
+        let latitudeField;
+        let longitudeField;
+
+        for (const field of fields) {
+          const name = normalizeFieldName(field.name);
+          if (!latitudeField && (name === "lat" || name === "latitude" || name.endsWith("lat") || name.endsWith("latitude"))) {
+            latitudeField = field;
+          }
+          if (
+            !longitudeField &&
+            (name === "lon" ||
+              name === "lng" ||
+              name === "long" ||
+              name === "longitude" ||
+              name.endsWith("lon") ||
+              name.endsWith("lng") ||
+              name.endsWith("long") ||
+              name.endsWith("longitude"))
+          ) {
+            longitudeField = field;
+          }
+        }
+
+        return latitudeField && longitudeField ? { latitudeField, longitudeField } : null;
+      }
+
+      function normalizeLongitude(longitude) {
+        return ((((longitude + 180) % 360) + 360) % 360) - 180;
+      }
+
+      function clamp(value, min, max) {
+        return Math.min(max, Math.max(min, value));
+      }
+
+      function formatCompactNumber(value) {
+        return new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value);
+      }
+
+      function sqlNumber(value) {
+        if (!Number.isFinite(value)) throw new Error(`Invalid SQL number: ${value}`);
+        return String(value);
+      }
+
+      function getPaddedViewportBounds() {
+        if (!mapLibreMap) return null;
+
+        const bounds = mapLibreMap.getBounds();
+        const rawWest = bounds.getWest();
+        const rawEast = bounds.getEast();
+        const rawSouth = bounds.getSouth();
+        const rawNorth = bounds.getNorth();
+        const longitudeSpan = Math.max(0, rawEast - rawWest);
+        const latitudeSpan = Math.max(0, rawNorth - rawSouth);
+        const longitudePadding = Math.max(0.25, longitudeSpan * VIEWPORT_PADDING_RATIO);
+        const latitudePadding = Math.max(0.25, latitudeSpan * VIEWPORT_PADDING_RATIO);
+        const allLongitudes = longitudeSpan + longitudePadding * 2 >= 360;
+        const west = normalizeLongitude(rawWest - longitudePadding);
+        const east = normalizeLongitude(rawEast + longitudePadding);
+
+        return {
+          west,
+          east,
+          south: clamp(rawSouth - latitudePadding, -90, 90),
+          north: clamp(rawNorth + latitudePadding, -90, 90),
+          allLongitudes,
+          crossesAntimeridian: !allLongitudes && west > east,
+        };
+      }
+
+      function getViewportPredicate(bounds) {
+        const latitudePredicate = `latitude BETWEEN ${sqlNumber(bounds.south)} AND ${sqlNumber(bounds.north)}`;
+        if (bounds.allLongitudes) return latitudePredicate;
+
+        const longitudePredicate = bounds.crossesAntimeridian
+          ? `(longitude >= ${sqlNumber(bounds.west)} OR longitude <= ${sqlNumber(bounds.east)})`
+          : `longitude BETWEEN ${sqlNumber(bounds.west)} AND ${sqlNumber(bounds.east)}`;
+        return `${latitudePredicate} AND ${longitudePredicate}`;
+      }
+
+      function getViewportLod() {
+        const zoom = mapLibreMap?.getZoom() ?? 1;
+        return zoom >= SHIP_GLYPH_MIN_ZOOM ? "ships" : "tiles";
+      }
+
+      async function prepareAisSpatialData() {
+        setStatus("Preparing AIS positions for viewport and tile rendering...");
+        await conn.query(`
+          CREATE OR REPLACE TABLE ais_position_points AS
+          SELECT
+            CAST(latitude AS DOUBLE) AS latitude,
+            CAST(longitude AS DOUBLE) AS longitude
+          FROM test_parquet
+          WHERE latitude BETWEEN ${-MERCATOR_MAX_LATITUDE} AND ${MERCATOR_MAX_LATITUDE}
+            AND longitude BETWEEN -180 AND 180;
+        `);
+
+        await conn.query(`
+          CREATE OR REPLACE TABLE ais_latest_positions AS
+          WITH valid AS (
+            SELECT
+              trim(mmsi) AS mmsi,
+              CAST(latitude AS DOUBLE) AS latitude,
+              CAST(longitude AS DOUBLE) AS longitude,
+              TRY_CAST(trim(satellite_acquisition_time) AS BIGINT) AS position_time,
+              COALESCE(TRY_CAST(trim(satellite_acquisition_time) AS BIGINT), 0) AS position_rank,
+              CASE WHEN trim(name) <> '' THEN trim(name) ELSE NULL END AS name,
+              CASE WHEN trim(ship_type) <> '' THEN trim(ship_type) ELSE NULL END AS ship_type,
+              CASE WHEN trim(navigation_status) <> '' THEN trim(navigation_status) ELSE NULL END AS navigation_status,
+              TRY_CAST(trim(speed_over_ground) AS DOUBLE) AS speed_over_ground,
+              TRY_CAST(trim(course_over_ground) AS DOUBLE) AS raw_course_over_ground
+            FROM test_parquet
+            WHERE mmsi IS NOT NULL
+              AND trim(mmsi) <> ''
+              AND latitude BETWEEN -90 AND 90
+              AND longitude BETWEEN -180 AND 180
+          )
+          SELECT
+            mmsi,
+            arg_max(latitude, position_rank) AS latitude,
+            arg_max(longitude, position_rank) AS longitude,
+            max(position_time) AS position_time,
+            arg_max(name, position_rank) AS name,
+            arg_max(ship_type, position_rank) AS ship_type,
+            arg_max(navigation_status, position_rank) AS navigation_status,
+            arg_max(speed_over_ground, position_rank) AS speed_over_ground,
+            CASE
+              WHEN arg_max(raw_course_over_ground, position_rank) BETWEEN 0 AND 360 THEN arg_max(raw_course_over_ground, position_rank)
+              ELSE NULL
+            END AS course_over_ground
+          FROM valid
+          GROUP BY mmsi;
+        `);
+
+        const countTable = await conn.query("SELECT count(*) AS ship_count FROM ais_latest_positions;");
+        const countRows = tableToObjects(countTable, countTable.schema.fields, 1);
+        latestShipCount = Number(countRows[0]?.ship_count ?? 0);
+        const reportCountTable = await conn.query("SELECT count(*) AS report_count FROM ais_position_points;");
+        const reportCountRows = tableToObjects(reportCountTable, reportCountTable.schema.fields, 1);
+        validPositionReportCount = Number(reportCountRows[0]?.report_count ?? 0);
+        aisSpatialReady = true;
+      }
+
+      async function queryViewportShips(bounds) {
+        const predicate = getViewportPredicate(bounds);
+        const table = await conn.query(`
+          SELECT
+            mmsi,
+            latitude,
+            longitude,
+            position_time,
+            name,
+            ship_type,
+            navigation_status,
+            speed_over_ground,
+            course_over_ground
+          FROM ais_latest_positions
+          WHERE ${predicate}
+          ORDER BY position_time DESC NULLS LAST
+          LIMIT ${MAX_INDIVIDUAL_SHIPS + 1};
+        `);
+        return tableToObjects(table, table.schema.fields, MAX_INDIVIDUAL_SHIPS + 1);
+      }
+
+      function tileXToLongitude(x, z) {
+        return (x / 2 ** z) * 360 - 180;
+      }
+
+      function longitudeToTileX(longitude, z) {
+        const tileCount = 2 ** z;
+        return Math.floor(((clamp(longitude, -180, 180) + 180) / 360) * tileCount);
+      }
+
+      function tileYToLatitude(y, z) {
+        const mercatorY = Math.PI - (2 * Math.PI * y) / 2 ** z;
+        return (Math.atan(Math.sinh(mercatorY)) * 180) / Math.PI;
+      }
+
+      function latitudeToTileY(latitude, z) {
+        const clampedLatitude = clamp(latitude, -MERCATOR_MAX_LATITUDE, MERCATOR_MAX_LATITUDE);
+        const radians = (clampedLatitude * Math.PI) / 180;
+        return Math.floor(((1 - Math.log(Math.tan(radians) + 1 / Math.cos(radians)) / Math.PI) / 2) * 2 ** z);
+      }
+
+      function clampTileIndex(value, z) {
+        return clamp(value, 0, 2 ** z - 1);
+      }
+
+      function getDensityTileKey({ x, y, z }) {
+        return `${z}/${x}/${y}`;
+      }
+
+      function parseDensityTileKey(key) {
+        const [z, x, y] = key.split("/").map(Number);
+        return { x, y, z };
+      }
+
+      function getCachedParentDensityTileKey(key) {
+        const { x, y, z } = parseDensityTileKey(key);
+        for (let depth = 1; depth <= DENSITY_TILE_PARENT_FALLBACK_DEPTH && z - depth >= 0; depth += 1) {
+          const scale = 2 ** depth;
+          const parentKey = getDensityTileKey({ z: z - depth, x: Math.floor(x / scale), y: Math.floor(y / scale) });
+          if (densityTileCache.has(parentKey)) return parentKey;
+        }
+        return null;
+      }
+
+      function getDensityTileCoordinates(tileRequest) {
+        const index = tileRequest.index ?? tileRequest;
+        return {
+          x: Number(index.x ?? tileRequest.x),
+          y: Number(index.y ?? tileRequest.y),
+          z: Number(index.z ?? tileRequest.z),
+        };
+      }
+
+      function getDensityTileColor(value) {
+        if (value <= 0) return [0, 0, 0, 0];
+        if (value < 0.18) return [88, 24, 169, Math.round(55 + value * 230)];
+        if (value < 0.38) return [199, 24, 166, Math.round(90 + value * 225)];
+        if (value < 0.62) return [255, 53, 127, Math.round(120 + value * 180)];
+        if (value < 0.82) return [255, 140, 41, Math.round(150 + value * 105)];
+        return [255, 238, 88, 245];
+      }
+
+      function renderDensityTileCanvas(rows) {
+        const canvas = document.createElement("canvas");
+        canvas.width = DENSITY_TILE_SIZE;
+        canvas.height = DENSITY_TILE_SIZE;
+        const context = canvas.getContext("2d");
+        const imageData = context.createImageData(DENSITY_TILE_SIZE, DENSITY_TILE_SIZE);
+        const maxCount = rows.reduce((max, row) => Math.max(max, Number(row.ship_count) || 0), 0);
+        const maxLogCount = Math.max(1, Math.log1p(maxCount));
+
+        for (const row of rows) {
+          const x = Number(row.pixel_x);
+          const y = Number(row.pixel_y);
+          const count = Number(row.ship_count) || 0;
+          if (x < 0 || x >= DENSITY_TILE_SIZE || y < 0 || y >= DENSITY_TILE_SIZE || count <= 0) continue;
+
+          const color = getDensityTileColor(Math.log1p(count) / maxLogCount);
+          const index = (y * DENSITY_TILE_SIZE + x) * 4;
+          imageData.data[index] = color[0];
+          imageData.data[index + 1] = color[1];
+          imageData.data[index + 2] = color[2];
+          imageData.data[index + 3] = color[3];
+        }
+
+        context.putImageData(imageData, 0, 0);
+        return canvas;
+      }
+
+      function createTransparentDensityTile() {
+        const canvas = document.createElement("canvas");
+        canvas.width = DENSITY_TILE_SIZE;
+        canvas.height = DENSITY_TILE_SIZE;
+        return canvas;
+      }
+
+      async function getDensityTileData(tileRequest) {
+        const { x, y, z } = getDensityTileCoordinates(tileRequest);
+        if (![x, y, z].every(Number.isFinite)) return null;
+
+        const west = tileXToLongitude(x, z);
+        const east = tileXToLongitude(x + 1, z);
+        const north = clamp(tileYToLatitude(y, z), -MERCATOR_MAX_LATITUDE, MERCATOR_MAX_LATITUDE);
+        const south = clamp(tileYToLatitude(y + 1, z), -MERCATOR_MAX_LATITUDE, MERCATOR_MAX_LATITUDE);
+        const scale = 2 ** z;
+        try {
+          const table = await conn.query(`
+            WITH tile_points AS (
+              SELECT
+                CAST(floor(((((longitude + 180.0) / 360.0) * ${sqlNumber(scale)}) - ${sqlNumber(x)}) * ${DENSITY_TILE_SIZE}) AS INTEGER) AS pixel_x,
+                CAST(floor(((((1.0 - (ln(tan(latitude * pi() / 180.0) + (1.0 / cos(latitude * pi() / 180.0))) / pi())) / 2.0) * ${sqlNumber(scale)}) - ${sqlNumber(y)}) * ${DENSITY_TILE_SIZE}) AS INTEGER) AS pixel_y
+              FROM ais_position_points
+              WHERE latitude BETWEEN ${sqlNumber(south)} AND ${sqlNumber(north)}
+                AND longitude >= ${sqlNumber(west)}
+                AND longitude < ${sqlNumber(east)}
+            )
+            SELECT pixel_x, pixel_y, count(*)::INTEGER AS ship_count
+            FROM tile_points
+            WHERE pixel_x BETWEEN 0 AND ${DENSITY_TILE_SIZE - 1}
+              AND pixel_y BETWEEN 0 AND ${DENSITY_TILE_SIZE - 1}
+            GROUP BY pixel_x, pixel_y;
+          `);
+          const rows = tableToObjects(table, table.schema.fields);
+          return {
+            image: renderDensityTileCanvas(rows),
+            bounds: [west, south, east, north],
+            count: rows.reduce((sum, row) => sum + (Number(row.ship_count) || 0), 0),
+          };
+        } catch (error) {
+          console.error(`Density tile ${z}/${x}/${y} failed`, error);
+          return { image: createTransparentDensityTile(), bounds: [west, south, east, north], count: 0 };
+        }
+      }
+
+      function getDensityRenderZoom() {
+        return clamp(Math.floor((mapLibreMap?.getZoom() ?? 0) + 0.5), 0, DENSITY_TILE_MAX_ZOOM);
+      }
+
+      function getVisibleDensityTileRequests() {
+        if (!mapLibreMap) return [];
+
+        const z = getDensityRenderZoom();
+        const tileCount = 2 ** z;
+        const bounds = mapLibreMap.getBounds();
+        const rawWest = bounds.getWest();
+        const rawEast = bounds.getEast();
+        const north = clamp(bounds.getNorth(), -MERCATOR_MAX_LATITUDE, MERCATOR_MAX_LATITUDE);
+        const south = clamp(bounds.getSouth(), -MERCATOR_MAX_LATITUDE, MERCATOR_MAX_LATITUDE);
+        const allLongitudes = rawEast - rawWest >= 360;
+        const west = normalizeLongitude(rawWest);
+        const east = normalizeLongitude(rawEast);
+        const minY = clampTileIndex(latitudeToTileY(north, z) - DENSITY_TILE_BUFFER, z);
+        const maxY = clampTileIndex(latitudeToTileY(south, z) + DENSITY_TILE_BUFFER, z);
+        const requests = [];
+
+        const appendXRange = (startX, endX) => {
+          const minX = clampTileIndex(startX - DENSITY_TILE_BUFFER, z);
+          const maxX = clampTileIndex(endX + DENSITY_TILE_BUFFER, z);
+          for (let x = minX; x <= maxX; x += 1) {
+            for (let y = minY; y <= maxY; y += 1) requests.push({ x, y, z });
+          }
+        };
+
+        if (allLongitudes) {
+          appendXRange(0, tileCount - 1);
+        } else if (west <= east) {
+          appendXRange(longitudeToTileX(west, z), longitudeToTileX(east, z));
+        } else {
+          appendXRange(longitudeToTileX(west, z), tileCount - 1);
+          appendXRange(0, longitudeToTileX(east, z));
+        }
+
+        return requests;
+      }
+
+      function pruneDensityTileCache() {
+        while (densityTileCache.size > DENSITY_TILE_CACHE_LIMIT) {
+          const oldestKey = densityTileCache.keys().next().value;
+          densityTileCache.delete(oldestKey);
+          densityTileGenerations.delete(oldestKey);
+        }
+      }
+
+      function scheduleDensityTileRedraw() {
+        if (densityTileRedrawFrame) return;
+        densityTileRedrawFrame = window.requestAnimationFrame(() => {
+          densityTileRedrawFrame = 0;
+          if (!hasDeckRenderer()) return;
+          rerenderActiveViewportLayers();
+        });
+      }
+
+      function requestMissingDensityTiles(tileRequests) {
+        const renderVersion = densityTileRenderVersion;
+        for (const tileRequest of tileRequests) {
+          const key = getDensityTileKey(tileRequest);
+          if (densityTileGenerations.get(key) === renderVersion || densityTileRequests.has(key)) continue;
+
+          const request = getDensityTileData(tileRequest)
+            .then((tileData) => {
+              densityTileRequests.delete(key);
+              if (tileData) {
+                densityTileCache.delete(key);
+                densityTileCache.set(key, tileData);
+                densityTileGenerations.set(key, renderVersion);
+                pruneDensityTileCache();
+              }
+              scheduleDensityTileRedraw();
+            })
+            .catch((error) => {
+              densityTileRequests.delete(key);
+              console.error(`Density tile ${key} failed`, error);
+            });
+          densityTileRequests.set(key, request);
+        }
+      }
+
+      function sameDensityTileKeys(leftKeys, rightKeys) {
+        if (leftKeys.length !== rightKeys.length) return false;
+        return leftKeys.every((key, index) => key === rightKeys[index]);
+      }
+
+      function beginDensityTileRender() {
+        const tileRequests = getVisibleDensityTileRequests();
+        const tileKeys = tileRequests.map(getDensityTileKey);
+        const tileSetChanged = !sameDensityTileKeys(tileKeys, densityTileTargetKeys);
+
+        densityTileRenderVersion += 1;
+        densityTileTargetRequests = tileRequests;
+
+        if (tileSetChanged) {
+          densityTilePreviousKeys = densityTileDisplayedKeys.filter((key) => densityTileCache.has(key));
+          densityTileTargetKeys = tileKeys;
+          densityTileTransitionStart = 0;
+          densityTileTransitionStartedAt = performance.now();
+        }
+
+        requestMissingDensityTiles(densityTileTargetRequests);
+      }
+
+      function getDensityTileCoverage() {
+        if (densityTileTargetKeys.length === 0) return 1;
+        const readyCount = densityTileTargetKeys.filter((key) => densityTileGenerations.get(key) === densityTileRenderVersion).length;
+        return readyCount / densityTileTargetKeys.length;
+      }
+
+      function scheduleDensityTransitionFrame() {
+        if (densityTileTransitionFrame) return;
+        densityTileTransitionFrame = window.requestAnimationFrame(() => {
+          densityTileTransitionFrame = 0;
+          rerenderActiveViewportLayers();
+        });
+      }
+
+      function createDensityBitmapLayer(key, tileData, opacity, phase) {
+        return new window.deck.BitmapLayer({
+          id: `ais-density-tile-${phase}-${key}`,
+          bounds: tileData.bounds,
+          image: tileData.image,
+          opacity,
+        });
+      }
+
+      function createDensityBitmapLayers() {
+        if (densityTileTargetRequests.length === 0) beginDensityTileRender();
+
+        requestMissingDensityTiles(densityTileTargetRequests);
+
+        const targetCoverage = getDensityTileCoverage();
+        const holdElapsedMs = performance.now() - densityTileTransitionStartedAt;
+        const shouldStartTransition =
+          densityTilePreviousKeys.length > 0 &&
+          !densityTileTransitionStart &&
+          (targetCoverage >= DENSITY_TILE_READY_THRESHOLD || holdElapsedMs >= DENSITY_TILE_MAX_HOLD_MS);
+
+        if (shouldStartTransition) densityTileTransitionStart = performance.now();
+
+        const transitionProgress = densityTileTransitionStart
+          ? clamp((performance.now() - densityTileTransitionStart) / DENSITY_TILE_FADE_MS, 0, 1)
+          : densityTilePreviousKeys.length > 0
+            ? 0
+            : 1;
+
+        const layers = [];
+        const displayedKeys = [];
+
+        if (densityTilePreviousKeys.length > 0 && transitionProgress < 1) {
+          for (const key of densityTilePreviousKeys) {
+            const tileData = densityTileCache.get(key);
+            if (!tileData?.image) continue;
+            layers.push(createDensityBitmapLayer(key, tileData, aggregateOpacity * (1 - transitionProgress), "previous"));
+            displayedKeys.push(key);
+          }
+        }
+
+        if (transitionProgress > 0 || densityTilePreviousKeys.length === 0) {
+          const targetOpacity = densityTilePreviousKeys.length > 0 ? aggregateOpacity * transitionProgress : aggregateOpacity;
+          const fallbackKeys = new Set();
+          for (const key of densityTileTargetKeys) {
+            const tileData = densityTileCache.get(key);
+            if (tileData?.image) {
+              layers.push(createDensityBitmapLayer(key, tileData, targetOpacity, "target"));
+              displayedKeys.push(key);
+              continue;
+            }
+
+            const fallbackKey = getCachedParentDensityTileKey(key);
+            if (!fallbackKey || fallbackKeys.has(fallbackKey)) continue;
+            const fallbackTileData = densityTileCache.get(fallbackKey);
+            if (!fallbackTileData?.image) continue;
+            layers.push(createDensityBitmapLayer(fallbackKey, fallbackTileData, targetOpacity, "fallback"));
+            displayedKeys.push(fallbackKey);
+            fallbackKeys.add(fallbackKey);
+          }
+        }
+
+        if (densityTilePreviousKeys.length > 0 && transitionProgress < 1) {
+          scheduleDensityTransitionFrame();
+        } else if (transitionProgress >= 1) {
+          densityTilePreviousKeys = [];
+        }
+
+        if (displayedKeys.length > 0) densityTileDisplayedKeys = displayedKeys;
+        return layers;
+      }
+
+      function renderDynamicDensityTiles() {
+        if (!hasDeckRenderer() || !window.deck) return;
+
+        activeViewportMode = "tiles";
+        currentViewportShipRows = [];
+        beginDensityTileRender();
+        setDeckLayers(createDensityBitmapLayers());
+        setMapStatus(
+          `Rendering AIS density as dynamic ${DENSITY_TILE_SIZE}px slippy tiles from ${validPositionReportCount.toLocaleString()} valid position reports. Ship circles begin at zoom ${SHIP_GLYPH_MIN_ZOOM}.`,
+        );
+      }
+
+      function inferKeplerFieldType(field, rows) {
+        const name = field.name.toLowerCase();
+        const sample = rows.find((row) => row[field.name] !== null && row[field.name] !== undefined)?.[field.name];
+        if (sample instanceof Date || name.includes("date") || name.includes("time")) return "timestamp";
+        if (typeof sample === "bigint") return "integer";
+        if (typeof sample === "number") return Number.isInteger(sample) ? "integer" : "real";
+        if (typeof sample === "boolean") return "boolean";
+        return "string";
+      }
+
+      function normalizeKeplerValue(value) {
+        if (typeof value === "bigint") return Number.isSafeInteger(Number(value)) ? Number(value) : value.toString();
+        if (value instanceof Date) return value.toISOString();
+        if (value instanceof Uint8Array) return `[${value.length} bytes]`;
+        if (value && typeof value === "object") return stringifyCell(value);
+        return value;
+      }
+
+      function createKeplerConfig(latitudeField, longitudeField) {
+        return {
+          visState: {
+            layers: [
+              {
+                id: "query-points",
+                type: "point",
+                config: {
+                  dataId: KEPLER_DATA_ID,
+                  label: "Query coordinates",
+                  color: [138, 180, 248],
+                  columns: {
+                    lat: latitudeField.name,
+                    lng: longitudeField.name,
+                    altitude: null,
+                  },
+                  isVisible: true,
+                  visConfig: {
+                    radius: 10,
+                    fixedRadius: false,
+                    opacity: 0.85,
+                    outline: false,
+                    thickness: 2,
+                  },
+                },
+                visualChannels: {
+                  colorField: null,
+                  colorScale: "quantile",
+                  sizeField: null,
+                  sizeScale: "linear",
+                },
+              },
+            ],
+          },
+          mapStyle: {
+            styleType: MAP_STYLE_ID,
+            mapStyles: MAP_STYLES,
+          },
+        };
+      }
+
+      function clearKeplerMap(message) {
+        if (keplerStore && window.KeplerGl?.resetMapConfig) {
+          keplerStore.dispatch(window.KeplerGl.resetMapConfig());
+        }
+        currentHexbinPoints = [];
+        currentHexbinLabel = "";
+        setMapStatus(message);
+      }
+
+      function updateMapRenderer(points) {
+        currentHexbinPoints = points;
+        if (!hasDeckRenderer() || !window.deck) {
+          setMapStatus("deck.gl renderer is not initialized; ship positions could not be drawn.");
+          return null;
+        }
+
+        return renderCurrentHexbins(true);
+      }
+
+      function renderCurrentHexbins(fitBounds) {
+        const points = currentHexbinPoints;
+        if (!hasDeckRenderer() || !window.deck || points.length === 0) return null;
+
+        const radius = getHexbinRadius(points);
+
+        setDeckLayers(
+          [
+            new window.deck.HexagonLayer({
+              id: "query-hexbin-fallback",
+              data: points,
+              getPosition: (point) => [point.longitude, point.latitude],
+              getColorValue: (hexbinPoints) => hexbinPoints.length,
+              getElevationValue: (hexbinPoints) => hexbinPoints.length,
+              colorScaleType: "quantize",
+              colorAggregation: "COUNT",
+              elevationAggregation: "COUNT",
+              colorRange: [
+                [49, 130, 189, 170],
+                [107, 174, 214, 190],
+                [158, 202, 225, 210],
+                [254, 178, 76, 225],
+                [240, 59, 32, 240],
+                [189, 0, 38, 250],
+              ],
+              coverage: 0.85,
+              elevationScale: 50,
+              extruded: true,
+              pickable: true,
+              radius,
+            }),
+          ],
+        );
+
+        if (!mapLibreMap || points.length === 0) return radius;
+        if (!fitBounds) {
+          setHexbinStatus(radius);
+          return radius;
+        }
+
+        const bounds = new window.maplibregl.LngLatBounds();
+        for (const point of points) bounds.extend([point.longitude, point.latitude]);
+        if (!bounds.isEmpty()) {
+          mapLibreMap.fitBounds(bounds, { padding: 48, maxZoom: 12, duration: 500 });
+          window.setTimeout(() => {
+            renderCurrentHexbins(false);
+          }, 550);
+        }
+        setHexbinStatus(radius);
+        return radius;
+      }
+
+      function setHexbinStatus(radius) {
+        if (!currentHexbinPoints.length || !currentHexbinLabel) return;
+        setMapStatus(
+          `Rendered ${currentHexbinPoints.length.toLocaleString()} report${currentHexbinPoints.length === 1 ? "" : "s"} as count-colored hexbins from ${currentHexbinLabel}. Radius: ${(radius / 1000).toFixed(1)} km.`,
+        );
+      }
+
+      function getHexbinRadius(points) {
+        if (mapLibreMap) {
+          const center = mapLibreMap.getCenter();
+          const latitudeScale = Math.max(0.2, Math.cos((center.lat * Math.PI) / 180));
+          const metersPerPixel = (156_543.03392 * latitudeScale) / 2 ** mapLibreMap.getZoom();
+          return Math.min(MAX_HEXBIN_RADIUS_METERS, Math.max(MIN_HEXBIN_RADIUS_METERS, metersPerPixel * HEXBIN_SCREEN_RADIUS_PX));
+        }
+
+        if (points.length < 2) return 5000;
+
+        let minLatitude = Infinity;
+        let maxLatitude = -Infinity;
+        let minLongitude = Infinity;
+        let maxLongitude = -Infinity;
+        for (const point of points) {
+          minLatitude = Math.min(minLatitude, point.latitude);
+          maxLatitude = Math.max(maxLatitude, point.latitude);
+          minLongitude = Math.min(minLongitude, point.longitude);
+          maxLongitude = Math.max(maxLongitude, point.longitude);
+        }
+
+        const centerLatitude = (minLatitude + maxLatitude) / 2;
+        const latitudeMeters = Math.max(0, maxLatitude - minLatitude) * 111_320;
+        const longitudeMeters = Math.max(0, maxLongitude - minLongitude) * 111_320 * Math.cos((centerLatitude * Math.PI) / 180);
+        const extentMeters = Math.max(latitudeMeters, Math.abs(longitudeMeters));
+        if (!Number.isFinite(extentMeters) || extentMeters <= 0) return 5000;
+        return Math.min(250_000, Math.max(5_000, extentMeters / 80));
+      }
+
+      function getShipColor(row) {
+        const speed = Number(row.speed_over_ground);
+        if (Number.isFinite(speed) && speed <= 1) return [91, 141, 239, 210];
+        if (Number.isFinite(speed) && speed >= 50) return [255, 184, 77, 230];
+        return [87, 221, 181, 220];
+      }
+
+      function createShipGlyphLayer(rows) {
+        return new window.deck.ScatterplotLayer({
+          id: "viewport-ship-circles",
+          data: rows,
+          filled: true,
+          getFillColor: getShipColor,
+          getLineColor: [255, 255, 255, 235],
+          getPosition: (row) => [Number(row.longitude), Number(row.latitude)],
+          getRadius: (row) => {
+            const speed = Number(row.speed_over_ground);
+            return Number.isFinite(speed) && speed > 1 ? 5 : 4;
+          },
+          lineWidthMinPixels: 1.5,
+          lineWidthUnits: "pixels",
+          opacity: 0.9,
+          pickable: true,
+          radiusMaxPixels: 9,
+          radiusMinPixels: 4,
+          radiusUnits: "pixels",
+          stroked: true,
+        });
+      }
+
+      function getShipLayerProps() {
+        return {
+          getTooltip: ({ object, index }) => {
+            const row = object ?? currentViewportShipRows[index];
+            if (!row) return null;
+            return {
+              text: [
+                row.name || `MMSI ${row.mmsi}`,
+                `MMSI: ${row.mmsi}`,
+                `Ship type: ${row.ship_type || "unknown"}`,
+                `Status: ${row.navigation_status || "unknown"}`,
+              ].join("\n"),
+            };
+          },
+        };
+      }
+
+      function rerenderActiveViewportLayers() {
+        if (!hasDeckRenderer() || !window.deck) return;
+        if (activeViewportMode === "ships") {
+          setDeckLayers([...createDensityBitmapLayers(), createShipGlyphLayer(currentViewportShipRows)], getShipLayerProps());
+        } else {
+          setDeckLayers(createDensityBitmapLayers());
+        }
+      }
+
+      function renderViewportShips(rows, elapsedMs) {
+        if (!hasDeckRenderer() || !window.deck) return;
+
+        activeViewportMode = "ships";
+        currentViewportShipRows = rows;
+        beginDensityTileRender();
+
+        setDeckLayers(
+          [...createDensityBitmapLayers(), createShipGlyphLayer(rows)],
+          getShipLayerProps(),
+        );
+
+        setMapStatus(
+          `Rendered ${rows.length.toLocaleString()} visible ships as GPU-instanced circles from ${latestShipCount.toLocaleString()} latest positions. Query/render: ${elapsedMs.toFixed(1)} ms.`,
+        );
+      }
+
+      async function refreshViewportLayer() {
+        if (!aisSpatialReady || !conn || !mapLibreMap || !hasDeckRenderer()) return;
+
+        const bounds = getPaddedViewportBounds();
+        if (!bounds) return;
+
+        const runId = ++viewportRenderRun;
+        const startedAt = performance.now();
+        let lod = getViewportLod();
+        setMapStatus(`Loading ${lod} layer for visible viewport...`);
+
+        try {
+          if (lod === "tiles") {
+            renderDynamicDensityTiles();
+            return;
+          }
+
+          if (lod === "ships") {
+            const rows = await queryViewportShips(bounds);
+            if (runId !== viewportRenderRun) return;
+            if (rows.length <= MAX_INDIVIDUAL_SHIPS) {
+              renderViewportShips(rows, performance.now() - startedAt);
+              return;
+            }
+            renderDynamicDensityTiles();
+            setMapStatus(
+              `Visible viewport exceeds ${MAX_INDIVIDUAL_SHIPS.toLocaleString()} ships at zoom ${mapLibreMap.getZoom().toFixed(1)}; keeping dynamic raster tiles until the view is less crowded.`,
+            );
+            return;
+          }
+        } catch (error) {
+          if (runId !== viewportRenderRun) return;
+          console.error(error);
+          setMapStatus(error?.message ?? String(error));
+        }
+      }
+
+      function requestViewportRender(delay = VIEWPORT_RENDER_DEBOUNCE_MS) {
+        window.clearTimeout(viewportRenderTimer);
+        viewportRenderTimer = window.setTimeout(refreshViewportLayer, delay);
+      }
+
+      function updateKeplerMap(queryResult) {
+        if (queryResult.rowCount === 0) {
+          clearKeplerMap("Query returned no rows to map.");
+          requestViewportRender(0);
+          return;
+        }
+
+        if (queryResult.truncated) {
+          clearKeplerMap(
+            `Query returned ${queryResult.rowCount.toLocaleString()} rows; showing a ${queryResult.previewRowCount.toLocaleString()} row table preview only. The map remains on viewport-culled AIS rendering.`,
+          );
+          requestViewportRender(0);
+          return;
+        }
+
+        const coordinateFields = findCoordinateFields(queryResult.fields);
+        if (!coordinateFields) {
+          const fieldNames = queryResult.fields.map((field) => field.name).join(", ");
+          clearKeplerMap(`No latitude/longitude columns found in query preview. Query fields: ${fieldNames || "none"}. AIS viewport renderer remains active.`);
+          requestViewportRender(0);
+          return;
+        }
+
+        const { latitudeField, longitudeField } = coordinateFields;
+        const fields = queryResult.fields.map((field) => ({
+          name: field.name,
+          type: field === latitudeField || field === longitudeField ? "real" : inferKeplerFieldType(field, queryResult.rows),
+        }));
+        const rows = [];
+        const points = [];
+
+        for (const row of queryResult.rows) {
+          const latitude = Number(row[latitudeField.name]);
+          const longitude = Number(row[longitudeField.name]);
+          if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) continue;
+          if (latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) continue;
+
+          points.push({ latitude, longitude });
+
+          rows.push(
+            queryResult.fields.map((field) => {
+              if (field === latitudeField) return latitude;
+              if (field === longitudeField) return longitude;
+              return normalizeKeplerValue(row[field.name]);
+            }),
+          );
+        }
+
+        if (rows.length === 0) {
+          clearKeplerMap(`Found ${latitudeField.name}/${longitudeField.name}, but no valid coordinate rows.`);
+          requestViewportRender(0);
+          return;
+        }
+
+        currentHexbinLabel = `${latitudeField.name}/${longitudeField.name}`;
+        updateMapRenderer(points);
+
+        if (rows.length <= MAX_KEPLER_ROWS && keplerStore && window.KeplerGl?.addDataToMap) {
+          keplerStore.dispatch(
+            window.KeplerGl.addDataToMap({
+              datasets: {
+                info: {
+                  id: KEPLER_DATA_ID,
+                  label: `Query result ${++keplerDatasetVersion}`,
+                },
+                data: { fields, rows },
+              },
+              options: {
+                centerMap: true,
+                readOnly: true,
+                keepExistingConfig: false,
+              },
+              config: createKeplerConfig(latitudeField, longitudeField),
+            }),
+          );
+        }
+        setHexbinStatus(getHexbinRadius(points));
+      }
+
+      function renderTable(queryResult) {
+        if (queryResult.rowCount === 0) {
+          setResults("Query completed with no rows.");
+          return;
+        }
+
+        const { fields, rows } = queryResult;
+        const visibleRows = rows.slice(0, MAX_TABLE_ROWS);
+        const resultTable = document.createElement("table");
+        const thead = document.createElement("thead");
+        const tbody = document.createElement("tbody");
+        const headerRow = document.createElement("tr");
+
+        for (const field of fields) {
+          const th = document.createElement("th");
+          th.textContent = field.name;
+          headerRow.append(th);
+        }
+
+        thead.append(headerRow);
+
+        for (const row of visibleRows) {
+          const tr = document.createElement("tr");
+          for (const field of fields) {
+            const td = document.createElement("td");
+            td.textContent = stringifyCell(row[field.name]);
+            tr.append(td);
+          }
+          tbody.append(tr);
+        }
+
+        resultTable.append(thead, tbody);
+        if (queryResult.rowCount > MAX_TABLE_ROWS) {
+          const message = document.createElement("p");
+          message.className = "message";
+          message.textContent = queryResult.truncated
+            ? `Showing first ${MAX_TABLE_ROWS.toLocaleString()} rows. Query returned ${queryResult.rowCount.toLocaleString()} rows, so the table and ad hoc query map are capped to avoid browser memory pressure.`
+            : `Showing first ${MAX_TABLE_ROWS.toLocaleString()} of ${queryResult.rowCount.toLocaleString()} rows. The ad hoc query map uses all returned rows.`;
+          results.replaceChildren(message, resultTable);
+        } else {
+          results.replaceChildren(resultTable);
+        }
+      }
+
+      async function runQuery() {
+        const sql = queryInput.value.trim();
+        if (!sql || !conn) return;
+
+        const runId = ++activeRun;
+        runButton.disabled = true;
+        timing.textContent = "Running query...";
+        setMapStatus("Running query...");
+        setResults("Running query...");
+
+        const startedAt = performance.now();
+        try {
+          const table = await conn.query(sql);
+          const elapsedMs = performance.now() - startedAt;
+          if (runId !== activeRun) return;
+
+          timing.textContent = `Query executed in ${elapsedMs.toFixed(2)} ms.`;
+          const queryResult = getQueryResult(table);
+          updateKeplerMap(queryResult);
+          renderTable(queryResult);
+        } catch (error) {
+          const elapsedMs = performance.now() - startedAt;
+          if (runId !== activeRun) return;
+
+          console.error(error);
+          timing.textContent = `Query failed after ${elapsedMs.toFixed(2)} ms.`;
+          clearKeplerMap("Query failed; AIS viewport renderer remains active.");
+          requestViewportRender(0);
+          setResults(error?.message ?? String(error), "message error");
+        } finally {
+          if (runId === activeRun) runButton.disabled = false;
+        }
+      }
+
+      try {
+        const duckdb = await import(`https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@${DUCKDB_WASM_VERSION}/+esm`);
+        const db = await createDatabase(duckdb, (progress) => {
+          if (progress?.bytesLoaded && progress?.bytesTotal) {
+            setStatus(`Loading DuckDB-WASM ${Math.round((progress.bytesLoaded / progress.bytesTotal) * 100)}%...`);
+          }
+        });
+
+        setStatus(`Fetching ${SOURCE_URL}...`);
+        const fileHandle = await fetchToOPFS(SOURCE_URL, OPFS_FILE_NAME);
+        await db.registerFileHandle(OPFS_FILE_NAME, fileHandle, duckdb.DuckDBDataProtocol.BROWSER_FSACCESS, true);
+
+        conn = await db.connect();
+        await conn.query(`CREATE OR REPLACE VIEW test_parquet AS SELECT * FROM '${OPFS_FILE_NAME}';`);
+        await prepareAisSpatialData();
+
+        window.duckdbWasm = db;
+        window.testParquetOPFSHandle = fileHandle;
+
+        runButton.disabled = false;
+        setStatus(
+          `Ready. ${OPFS_FILE_NAME} is stored in OPFS; ${validPositionReportCount.toLocaleString()} AIS reports and ${latestShipCount.toLocaleString()} latest ship positions are prepared.`,
+        );
+        setResults("Ready. Run the default query or enter your own SQL against test_parquet or 'test.parquet'. Aggregate zooms use dynamic raster density tiles; close zooms use viewport ship circles.");
+        requestViewportRender(0);
+      } catch (error) {
+        console.error(error);
+        setStatus("Failed to initialize DuckDB-WASM. See the browser console for details.");
+        setResults(error?.message ?? String(error), "message error");
+      }
+
+      runButton.addEventListener("click", runQuery);
+      aggregateOpacityInput.addEventListener("input", () => {
+        aggregateOpacity = Number(aggregateOpacityInput.value) / 100;
+        updateAggregateOpacityStatus();
+        rerenderActiveViewportLayers();
+      });
+      queryInput.addEventListener("keydown", (event) => {
+        if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+          event.preventDefault();
+          runQuery();
+        }
+      });
+    </script>
+  </body>
+</html>
