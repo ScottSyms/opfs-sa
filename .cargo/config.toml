@@ -1,0 +1,2 @@
+[target.wasm32-unknown-unknown]
+linker = "/nix/store/83lpn5vw2fwsrkqb957fy80d45xnrnas-lld-21.1.8/bin/lld"

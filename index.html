@@ -342,6 +342,8 @@
       const DUCKDB_WASM_VERSION = "1.33.1-dev45.0";
       const SOURCE_URL = "http://localhost:8080/test.parquet";
       const OPFS_FILE_NAME = "test.parquet";
+      const DENSITY_WASM_URL = "./density_engine.wasm";
+      const DENSITY_WORKER_URL = "./density_worker.js";
       const KEPLER_MAP_ID = "query-map";
       const KEPLER_DATA_ID = "query-result";
       const MAX_TABLE_ROWS = 100;
@@ -359,6 +361,7 @@
       const DENSITY_TILE_READY_THRESHOLD = 0.8;
       const DENSITY_TILE_MAX_HOLD_MS = 800;
       const DENSITY_TILE_PARENT_FALLBACK_DEPTH = 2;
+      const DENSITY_TILE_REQUEST_DEBOUNCE_MS = 150;
       const MERCATOR_MAX_LATITUDE = 85.05112878;
       const HEXBIN_SCREEN_RADIUS_PX = 12;
       const MIN_HEXBIN_RADIUS_METERS = 100;
@@ -400,6 +403,11 @@
       let viewportRenderTimer;
       let latestShipCount = 0;
       let validPositionReportCount = 0;
+      let densityWasm;
+      let densityWasmExports;
+      let densityWorker;
+      let densityWorkerReady = false;
+      let densityWorkerInitPromise = null;
       let aggregateOpacity = Number(aggregateOpacityInput.value) / 100;
       let activeViewportMode = "tiles";
       let currentViewportShipRows = [];
@@ -415,6 +423,8 @@
       const densityTileCache = new Map();
       const densityTileGenerations = new Map();
       const densityTileRequests = new Map();
+      let densityTileDebounceTimer = null;
+      let pendingTileRequests = [];
       let currentHexbinPoints = [];
       let currentHexbinLabel = "";
 
@@ -629,6 +639,122 @@
         return fileHandle;
       }
 
+      async function createDensityWasmEngine() {
+        const response = await fetch(DENSITY_WASM_URL);
+        if (!response.ok) {
+          throw new Error(`Failed to load ${DENSITY_WASM_URL}: ${response.status} ${response.statusText}`);
+        }
+
+        const { instance } = await WebAssembly.instantiate(await response.arrayBuffer(), {});
+        densityWasm = instance;
+        densityWasmExports = instance.exports;
+        return instance.exports;
+      }
+
+      async function initDensityWorker() {
+        if (densityWorkerInitPromise) return densityWorkerInitPromise;
+
+        densityWorkerInitPromise = new Promise((resolve, reject) => {
+          try {
+            densityWorker = new Worker(DENSITY_WORKER_URL);
+
+            densityWorker.onmessage = (event) => {
+              const { type, success, error } = event.data;
+              if (type === "init_complete") {
+                if (success) {
+                  densityWorkerReady = true;
+                  resolve();
+                } else {
+                  reject(new Error(error || "Worker initialization failed"));
+                }
+              }
+            };
+
+            densityWorker.onerror = (error) => {
+              reject(new Error(`Worker error: ${error.message}`));
+            };
+
+            densityWorker.postMessage({ type: "init", wasmUrl: DENSITY_WASM_URL });
+          } catch (error) {
+            reject(error);
+          }
+        });
+
+        return densityWorkerInitPromise;
+      }
+
+      function getArrowVectorLength(vector) {
+        return vector?.length ?? vector?.numRows ?? 0;
+      }
+
+      function getArrowVectorValue(vector, index) {
+        if (typeof vector.get === "function") return vector.get(index);
+        return vector[index];
+      }
+
+      function getArrowColumn(table, fieldName) {
+        if (typeof table.getChild === "function") {
+          const column = table.getChild(fieldName);
+          if (column) return column;
+        }
+
+        const fieldIndex = table.schema.fields.findIndex((field) => field.name === fieldName);
+        if (fieldIndex < 0) throw new Error(`Column ${fieldName} was not found in Arrow table.`);
+        if (typeof table.getChildAt === "function") return table.getChildAt(fieldIndex);
+        if (Array.isArray(table.batches) && table.batches.length > 0) return table.batches[0].getChildAt(fieldIndex);
+        throw new Error(`Column ${fieldName} could not be read from Arrow table.`);
+      }
+
+      function copyFloat64ArrayToWasm(values) {
+        const byteLength = values.byteLength;
+        const pointer = densityWasmExports.alloc_bytes(byteLength);
+        if (!pointer) throw new Error(`Could not allocate ${byteLength.toLocaleString()} bytes in density WASM memory.`);
+        new Uint8Array(densityWasmExports.memory.buffer, pointer, byteLength).set(new Uint8Array(values.buffer, values.byteOffset, byteLength));
+        return pointer;
+      }
+
+      function arrowColumnToFloat64Array(vector, expectedLength) {
+        const length = getArrowVectorLength(vector) || expectedLength;
+        const values = new Float64Array(length);
+        for (let index = 0; index < length; index += 1) {
+          values[index] = Number(getArrowVectorValue(vector, index));
+        }
+        return values;
+      }
+
+      async function loadDensityPointsIntoWasm() {
+        if (!densityWasmExports) await createDensityWasmEngine();
+        await initDensityWorker();
+
+        setStatus("Loading AIS coordinates into Rust/WASM density engine...");
+        const table = await conn.query("SELECT latitude, longitude FROM ais_position_points;");
+        const rowCount = table.numRows ?? table.length ?? 0;
+        const latitudeValues = arrowColumnToFloat64Array(getArrowColumn(table, "latitude"), rowCount);
+        const longitudeValues = arrowColumnToFloat64Array(getArrowColumn(table, "longitude"), rowCount);
+
+        const loadPromise = new Promise((resolve, reject) => {
+          const handler = (event) => {
+            if (event.data.type === "load_points_complete") {
+              densityWorker.removeEventListener("message", handler);
+              if (event.data.success) {
+                validPositionReportCount = Number(event.data.count);
+                resolve();
+              } else {
+                reject(new Error(event.data.error || "Worker load_points failed"));
+              }
+            }
+          };
+          densityWorker.addEventListener("message", handler);
+          densityWorker.postMessage({
+            type: "load_points",
+            latitudes: latitudeValues,
+            longitudes: longitudeValues,
+          }, [latitudeValues.buffer, longitudeValues.buffer]);
+        });
+
+        await loadPromise;
+      }
+
       function stringifyCell(value) {
         if (value === null || value === undefined) return "";
         if (typeof value === "bigint") return value.toString();
@@ -806,6 +932,7 @@
         const reportCountTable = await conn.query("SELECT count(*) AS report_count FROM ais_position_points;");
         const reportCountRows = tableToObjects(reportCountTable, reportCountTable.schema.fields, 1);
         validPositionReportCount = Number(reportCountRows[0]?.report_count ?? 0);
+        await loadDensityPointsIntoWasm();
         aisSpatialReady = true;
       }
 
@@ -882,46 +1009,19 @@
         };
       }
 
-      function getDensityTileColor(value) {
-        if (value <= 0) return [0, 0, 0, 0];
-        if (value < 0.18) return [88, 24, 169, Math.round(55 + value * 230)];
-        if (value < 0.38) return [199, 24, 166, Math.round(90 + value * 225)];
-        if (value < 0.62) return [255, 53, 127, Math.round(120 + value * 180)];
-        if (value < 0.82) return [255, 140, 41, Math.round(150 + value * 105)];
-        return [255, 238, 88, 245];
-      }
-
-      function renderDensityTileCanvas(rows) {
-        const canvas = document.createElement("canvas");
-        canvas.width = DENSITY_TILE_SIZE;
-        canvas.height = DENSITY_TILE_SIZE;
-        const context = canvas.getContext("2d");
-        const imageData = context.createImageData(DENSITY_TILE_SIZE, DENSITY_TILE_SIZE);
-        const maxCount = rows.reduce((max, row) => Math.max(max, Number(row.ship_count) || 0), 0);
-        const maxLogCount = Math.max(1, Math.log1p(maxCount));
-
-        for (const row of rows) {
-          const x = Number(row.pixel_x);
-          const y = Number(row.pixel_y);
-          const count = Number(row.ship_count) || 0;
-          if (x < 0 || x >= DENSITY_TILE_SIZE || y < 0 || y >= DENSITY_TILE_SIZE || count <= 0) continue;
-
-          const color = getDensityTileColor(Math.log1p(count) / maxLogCount);
-          const index = (y * DENSITY_TILE_SIZE + x) * 4;
-          imageData.data[index] = color[0];
-          imageData.data[index + 1] = color[1];
-          imageData.data[index + 2] = color[2];
-          imageData.data[index + 3] = color[3];
-        }
-
-        context.putImageData(imageData, 0, 0);
-        return canvas;
-      }
-
       function createTransparentDensityTile() {
         const canvas = document.createElement("canvas");
         canvas.width = DENSITY_TILE_SIZE;
         canvas.height = DENSITY_TILE_SIZE;
+        return canvas;
+      }
+
+      function createDensityTileCanvasFromRgba(rgbaBytes) {
+        const canvas = document.createElement("canvas");
+        canvas.width = DENSITY_TILE_SIZE;
+        canvas.height = DENSITY_TILE_SIZE;
+        const context = canvas.getContext("2d");
+        context.putImageData(new ImageData(rgbaBytes, DENSITY_TILE_SIZE, DENSITY_TILE_SIZE), 0, 0);
         return canvas;
       }
 
@@ -933,30 +1033,37 @@
         const east = tileXToLongitude(x + 1, z);
         const north = clamp(tileYToLatitude(y, z), -MERCATOR_MAX_LATITUDE, MERCATOR_MAX_LATITUDE);
         const south = clamp(tileYToLatitude(y + 1, z), -MERCATOR_MAX_LATITUDE, MERCATOR_MAX_LATITUDE);
-        const scale = 2 ** z;
+
         try {
-          const table = await conn.query(`
-            WITH tile_points AS (
-              SELECT
-                CAST(floor(((((longitude + 180.0) / 360.0) * ${sqlNumber(scale)}) - ${sqlNumber(x)}) * ${DENSITY_TILE_SIZE}) AS INTEGER) AS pixel_x,
-                CAST(floor(((((1.0 - (ln(tan(latitude * pi() / 180.0) + (1.0 / cos(latitude * pi() / 180.0))) / pi())) / 2.0) * ${sqlNumber(scale)}) - ${sqlNumber(y)}) * ${DENSITY_TILE_SIZE}) AS INTEGER) AS pixel_y
-              FROM ais_position_points
-              WHERE latitude BETWEEN ${sqlNumber(south)} AND ${sqlNumber(north)}
-                AND longitude >= ${sqlNumber(west)}
-                AND longitude < ${sqlNumber(east)}
-            )
-            SELECT pixel_x, pixel_y, count(*)::INTEGER AS ship_count
-            FROM tile_points
-            WHERE pixel_x BETWEEN 0 AND ${DENSITY_TILE_SIZE - 1}
-              AND pixel_y BETWEEN 0 AND ${DENSITY_TILE_SIZE - 1}
-            GROUP BY pixel_x, pixel_y;
-          `);
-          const rows = tableToObjects(table, table.schema.fields);
-          return {
-            image: renderDensityTileCanvas(rows),
-            bounds: [west, south, east, north],
-            count: rows.reduce((sum, row) => sum + (Number(row.ship_count) || 0), 0),
-          };
+          if (!densityWorkerReady) {
+            await initDensityWorker();
+          }
+
+          const key = getDensityTileKey({ x, y, z });
+          const tilePromise = new Promise((resolve, reject) => {
+            const handler = (event) => {
+              if (event.data.type === "tile_ready" && event.data.key === key) {
+                densityWorker.removeEventListener("message", handler);
+                if (event.data.success) {
+                  const canvas = createDensityTileCanvasFromRgba(event.data.rgba);
+                  resolve({ image: canvas, bounds: [west, south, east, north], count: 0 });
+                } else {
+                  reject(new Error(event.data.error || "Tile render failed"));
+                }
+              }
+            };
+            densityWorker.addEventListener("message", handler);
+            densityWorker.postMessage({
+              type: "render_tile",
+              z,
+              x,
+              y,
+              size: DENSITY_TILE_SIZE,
+              key,
+            });
+          });
+
+          return await tilePromise;
         } catch (error) {
           console.error(`Density tile ${z}/${x}/${y} failed`, error);
           return { image: createTransparentDensityTile(), bounds: [west, south, east, north], count: 0 };
@@ -964,14 +1071,34 @@
       }
 
       function getDensityRenderZoom() {
-        return clamp(Math.floor((mapLibreMap?.getZoom() ?? 0) + 0.5), 0, DENSITY_TILE_MAX_ZOOM);
+        return Math.ceil(mapLibreMap?.getZoom() ?? 0);
+      }
+
+      function tileIntersectsViewport(x, y, z, viewportWest, viewportEast, viewportSouth, viewportNorth, allLongitudes) {
+        const tileWest = tileXToLongitude(x, z);
+        const tileEast = tileXToLongitude(x + 1, z);
+        const tileNorth = clamp(tileYToLatitude(y, z), -MERCATOR_MAX_LATITUDE, MERCATOR_MAX_LATITUDE);
+        const tileSouth = clamp(tileYToLatitude(y + 1, z), -MERCATOR_MAX_LATITUDE, MERCATOR_MAX_LATITUDE);
+
+        if (tileSouth > viewportNorth || tileNorth < viewportSouth) return false;
+
+        if (allLongitudes) return true;
+
+        const normTileWest = normalizeLongitude(tileWest);
+        const normTileEast = normalizeLongitude(tileEast);
+
+        if (normTileWest <= normTileEast) {
+          return normTileEast >= viewportWest && normTileWest <= viewportEast;
+        }
+
+        return true;
       }
 
       function getVisibleDensityTileRequests() {
         if (!mapLibreMap) return [];
 
-        const z = getDensityRenderZoom();
-        const tileCount = 2 ** z;
+        const baseZoom = clamp(getDensityRenderZoom(), 0, DENSITY_TILE_MAX_ZOOM);
+        const higherZoom = Math.min(baseZoom + 1, DENSITY_TILE_MAX_ZOOM);
         const bounds = mapLibreMap.getBounds();
         const rawWest = bounds.getWest();
         const rawEast = bounds.getEast();
@@ -980,25 +1107,64 @@
         const allLongitudes = rawEast - rawWest >= 360;
         const west = normalizeLongitude(rawWest);
         const east = normalizeLongitude(rawEast);
-        const minY = clampTileIndex(latitudeToTileY(north, z) - DENSITY_TILE_BUFFER, z);
-        const maxY = clampTileIndex(latitudeToTileY(south, z) + DENSITY_TILE_BUFFER, z);
         const requests = [];
 
-        const appendXRange = (startX, endX) => {
+        const appendTileRange = (z, startX, endX, minY, maxY) => {
+          const tileCount = 2 ** z;
           const minX = clampTileIndex(startX - DENSITY_TILE_BUFFER, z);
           const maxX = clampTileIndex(endX + DENSITY_TILE_BUFFER, z);
           for (let x = minX; x <= maxX; x += 1) {
-            for (let y = minY; y <= maxY; y += 1) requests.push({ x, y, z });
+            for (let y = minY; y <= maxY; y += 1) {
+              if (tileIntersectsViewport(x, y, z, west, east, south, north, allLongitudes)) {
+                requests.push({ x, y, z });
+              }
+            }
           }
         };
 
-        if (allLongitudes) {
-          appendXRange(0, tileCount - 1);
-        } else if (west <= east) {
-          appendXRange(longitudeToTileX(west, z), longitudeToTileX(east, z));
-        } else {
-          appendXRange(longitudeToTileX(west, z), tileCount - 1);
-          appendXRange(0, longitudeToTileX(east, z));
+        const baseTileCount = 2 ** baseZoom;
+        const baseMinY = clampTileIndex(latitudeToTileY(north, baseZoom) - DENSITY_TILE_BUFFER, baseZoom);
+        const baseMaxY = clampTileIndex(latitudeToTileY(south, baseZoom) + DENSITY_TILE_BUFFER, baseZoom);
+
+        const appendXRangeForZoom = (z, tileCount) => {
+          if (allLongitudes) {
+            appendTileRange(z, 0, tileCount - 1, baseMinY, baseMaxY);
+          } else if (west <= east) {
+            appendTileRange(z, longitudeToTileX(west, z), longitudeToTileX(east, z), baseMinY, baseMaxY);
+          } else {
+            appendTileRange(z, longitudeToTileX(west, z), tileCount - 1, baseMinY, baseMaxY);
+            appendTileRange(z, 0, longitudeToTileX(east, z), baseMinY, baseMaxY);
+          }
+        };
+
+        appendXRangeForZoom(baseZoom, baseTileCount);
+
+        if (higherZoom > baseZoom) {
+          const higherTileCount = 2 ** higherZoom;
+          const higherMinY = clampTileIndex(latitudeToTileY(north, higherZoom) - DENSITY_TILE_BUFFER, higherZoom);
+          const higherMaxY = clampTileIndex(latitudeToTileY(south, higherZoom) + DENSITY_TILE_BUFFER, higherZoom);
+
+          const appendHigherXRange = (z, startX, endX, minY, maxY) => {
+            const tileCount = 2 ** z;
+            const minX = clampTileIndex(startX - DENSITY_TILE_BUFFER, z);
+            const maxX = clampTileIndex(endX + DENSITY_TILE_BUFFER, z);
+            for (let x = minX; x <= maxX; x += 1) {
+              for (let y = minY; y <= maxY; y += 1) {
+                if (tileIntersectsViewport(x, y, z, west, east, south, north, allLongitudes)) {
+                  requests.push({ x, y, z });
+                }
+              }
+            }
+          };
+
+          if (allLongitudes) {
+            appendHigherXRange(higherZoom, 0, higherTileCount - 1, higherMinY, higherMaxY);
+          } else if (west <= east) {
+            appendHigherXRange(higherZoom, longitudeToTileX(west, higherZoom), longitudeToTileX(east, higherZoom), higherMinY, higherMaxY);
+          } else {
+            appendHigherXRange(higherZoom, longitudeToTileX(west, higherZoom), higherTileCount - 1, higherMinY, higherMaxY);
+            appendHigherXRange(higherZoom, 0, longitudeToTileX(east, higherZoom), higherMinY, higherMaxY);
+          }
         }
 
         return requests;
@@ -1023,27 +1189,45 @@
 
       function requestMissingDensityTiles(tileRequests) {
         const renderVersion = densityTileRenderVersion;
-        for (const tileRequest of tileRequests) {
-          const key = getDensityTileKey(tileRequest);
-          if (densityTileGenerations.get(key) === renderVersion || densityTileRequests.has(key)) continue;
 
-          const request = getDensityTileData(tileRequest)
-            .then((tileData) => {
-              densityTileRequests.delete(key);
-              if (tileData) {
-                densityTileCache.delete(key);
-                densityTileCache.set(key, tileData);
-                densityTileGenerations.set(key, renderVersion);
-                pruneDensityTileCache();
-              }
-              scheduleDensityTileRedraw();
-            })
-            .catch((error) => {
-              densityTileRequests.delete(key);
-              console.error(`Density tile ${key} failed`, error);
-            });
-          densityTileRequests.set(key, request);
+        pendingTileRequests = tileRequests.filter((tileRequest) => {
+          const key = getDensityTileKey(tileRequest);
+          return !(densityTileGenerations.get(key) === renderVersion || densityTileRequests.has(key));
+        });
+
+        if (pendingTileRequests.length === 0) return;
+
+        if (densityTileDebounceTimer) {
+          window.clearTimeout(densityTileDebounceTimer);
         }
+
+        densityTileDebounceTimer = window.setTimeout(() => {
+          densityTileDebounceTimer = null;
+          const tilesToRequest = pendingTileRequests;
+          pendingTileRequests = [];
+
+          for (const tileRequest of tilesToRequest) {
+            const key = getDensityTileKey(tileRequest);
+            if (densityTileGenerations.get(key) === renderVersion || densityTileRequests.has(key)) continue;
+
+            const request = getDensityTileData(tileRequest)
+              .then((tileData) => {
+                densityTileRequests.delete(key);
+                if (tileData) {
+                  densityTileCache.delete(key);
+                  densityTileCache.set(key, tileData);
+                  densityTileGenerations.set(key, renderVersion);
+                  pruneDensityTileCache();
+                }
+                scheduleDensityTileRedraw();
+              })
+              .catch((error) => {
+                densityTileRequests.delete(key);
+                console.error(`Density tile ${key} failed`, error);
+              });
+            densityTileRequests.set(key, request);
+          }
+        }, DENSITY_TILE_REQUEST_DEBOUNCE_MS);
       }
 
       function sameDensityTileKeys(leftKeys, rightKeys) {
@@ -1064,6 +1248,12 @@
           densityTileTargetKeys = tileKeys;
           densityTileTransitionStart = 0;
           densityTileTransitionStartedAt = performance.now();
+
+          for (const [key, promise] of densityTileRequests.entries()) {
+            if (!tileKeys.includes(key)) {
+              densityTileRequests.delete(key);
+            }
+          }
         }
 
         requestMissingDensityTiles(densityTileTargetRequests);
@@ -1127,7 +1317,14 @@
         if (transitionProgress > 0 || densityTilePreviousKeys.length === 0) {
           const targetOpacity = densityTilePreviousKeys.length > 0 ? aggregateOpacity * transitionProgress : aggregateOpacity;
           const fallbackKeys = new Set();
-          for (const key of densityTileTargetKeys) {
+
+          const sortedTargetKeys = [...densityTileTargetKeys].sort((a, b) => {
+            const zoomA = parseDensityTileKey(a).z;
+            const zoomB = parseDensityTileKey(b).z;
+            return zoomA - zoomB;
+          });
+
+          for (const key of sortedTargetKeys) {
             const tileData = densityTileCache.get(key);
             if (tileData?.image) {
               layers.push(createDensityBitmapLayer(key, tileData, targetOpacity, "target"));
@@ -1451,23 +1648,20 @@
       function updateKeplerMap(queryResult) {
         if (queryResult.rowCount === 0) {
           clearKeplerMap("Query returned no rows to map.");
-          requestViewportRender(0);
           return;
         }
 
         if (queryResult.truncated) {
           clearKeplerMap(
-            `Query returned ${queryResult.rowCount.toLocaleString()} rows; showing a ${queryResult.previewRowCount.toLocaleString()} row table preview only. The map remains on viewport-culled AIS rendering.`,
+            `Query returned ${queryResult.rowCount.toLocaleString()} rows; showing a ${queryResult.previewRowCount.toLocaleString()} row table preview only.`,
           );
-          requestViewportRender(0);
           return;
         }
 
         const coordinateFields = findCoordinateFields(queryResult.fields);
         if (!coordinateFields) {
           const fieldNames = queryResult.fields.map((field) => field.name).join(", ");
-          clearKeplerMap(`No latitude/longitude columns found in query preview. Query fields: ${fieldNames || "none"}. AIS viewport renderer remains active.`);
-          requestViewportRender(0);
+          clearKeplerMap(`No latitude/longitude columns found in query preview. Query fields: ${fieldNames || "none"}.`);
           return;
         }
 
@@ -1498,7 +1692,6 @@
 
         if (rows.length === 0) {
           clearKeplerMap(`Found ${latitudeField.name}/${longitudeField.name}, but no valid coordinate rows.`);
-          requestViewportRender(0);
           return;
         }
 
@@ -1578,7 +1771,6 @@
         const runId = ++activeRun;
         runButton.disabled = true;
         timing.textContent = "Running query...";
-        setMapStatus("Running query...");
         setResults("Running query...");
 
         const startedAt = performance.now();
@@ -1589,7 +1781,6 @@
 
           timing.textContent = `Query executed in ${elapsedMs.toFixed(2)} ms.`;
           const queryResult = getQueryResult(table);
-          updateKeplerMap(queryResult);
           renderTable(queryResult);
         } catch (error) {
           const elapsedMs = performance.now() - startedAt;
@@ -1597,8 +1788,6 @@
 
           console.error(error);
           timing.textContent = `Query failed after ${elapsedMs.toFixed(2)} ms.`;
-          clearKeplerMap("Query failed; AIS viewport renderer remains active.");
-          requestViewportRender(0);
           setResults(error?.message ?? String(error), "message error");
         } finally {
           if (runId === activeRun) runButton.disabled = false;
