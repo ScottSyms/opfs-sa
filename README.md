@@ -66,6 +66,25 @@ In-Browser DuckDB fetches a Parquet file (e.g., AIS ship position data) once and
 - Rust toolchain with `wasm32-unknown-unknown` target
 - `lld` linker
 
+### Quick Start with devenv (Recommended)
+
+This project includes a [`devenv.nix`](devenv.nix) configuration that provides a reproducible development shell with all dependencies pre-installed:
+
+```bash
+devenv shell
+```
+
+This gives you:
+- **Rust toolchain** — compiler, cargo, and `wasm32-unknown-unknown` target
+- **DuckDB CLI** — for inspecting Parquet files directly
+- **Node.js + pnpm** — for serving the project
+- **rclone** — for data transfer between storage backends
+- **Git** — version control
+
+No need to install anything globally. The shell is isolated and reproducible — same environment on any machine with Nix.
+
+### Manual Setup
+
 ### Build WASM
 
 ```bash
