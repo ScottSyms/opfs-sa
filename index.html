@@ -427,6 +427,9 @@
       let pendingTileRequests = [];
       let currentHexbinPoints = [];
       let currentHexbinLabel = "";
+      let selectedShipMmsi = null;
+      let selectedShipTrackData = [];
+      let selectedShipTrackLayer = null;
 
       function setStatus(message) {
         status.textContent = message;
@@ -874,6 +877,9 @@
 
       function getViewportLod() {
         const zoom = mapLibreMap?.getZoom() ?? 1;
+        if (zoom < SHIP_GLYPH_MIN_ZOOM && selectedShipMmsi) {
+          clearShipTrack();
+        }
         return zoom >= SHIP_GLYPH_MIN_ZOOM ? "ships" : "tiles";
       }
 
@@ -932,6 +938,23 @@
         const reportCountTable = await conn.query("SELECT count(*) AS report_count FROM ais_position_points;");
         const reportCountRows = tableToObjects(reportCountTable, reportCountTable.schema.fields, 1);
         validPositionReportCount = Number(reportCountRows[0]?.report_count ?? 0);
+
+        await conn.query(`
+          CREATE OR REPLACE TABLE ais_track_points AS
+          SELECT
+            trim(mmsi) AS mmsi,
+            CAST(latitude AS DOUBLE) AS latitude,
+            CAST(longitude AS DOUBLE) AS longitude,
+            TRY_CAST(trim(satellite_acquisition_time) AS BIGINT) AS position_time
+          FROM test_parquet
+          WHERE mmsi IS NOT NULL
+            AND trim(mmsi) <> ''
+            AND latitude BETWEEN -90 AND 90
+            AND longitude BETWEEN -180 AND 180
+            AND satellite_acquisition_time IS NOT NULL
+          ORDER BY mmsi, position_time;
+        `);
+
         await loadDensityPointsIntoWasm();
         aisSpatialReady = true;
       }
@@ -1562,6 +1585,18 @@
 
       function getShipLayerProps() {
         return {
+          onClick: (info) => {
+            if (!info.object || !mapLibreMap) return;
+            const zoom = mapLibreMap.getZoom();
+            if (zoom < SHIP_GLYPH_MIN_ZOOM) return;
+
+            const mmsi = info.object.mmsi;
+            if (selectedShipMmsi === mmsi) {
+              clearShipTrack();
+            } else {
+              selectShipTrack(mmsi, info.object);
+            }
+          },
           getTooltip: ({ object, index }) => {
             const row = object ?? currentViewportShipRows[index];
             if (!row) return null;
@@ -1577,13 +1612,114 @@
         };
       }
 
+      async function selectShipTrack(mmsi, shipRow) {
+        selectedShipMmsi = mmsi;
+        selectedShipTrackData = [];
+        selectedShipTrackLayer = null;
+
+        const positionTime = Number(shipRow.position_time);
+        if (!Number.isFinite(positionTime) || positionTime <= 0) {
+          setMapStatus(`No position time available for MMSI ${mmsi}.`);
+          return;
+        }
+
+        const fourHoursSeconds = 4 * 60 * 60;
+        const startTime = positionTime - fourHoursSeconds;
+
+        try {
+          const table = await conn.query(`
+            SELECT latitude, longitude, position_time
+            FROM ais_track_points
+            WHERE mmsi = '${mmsi}'
+              AND position_time >= ${startTime}
+              AND position_time <= ${positionTime}
+            ORDER BY position_time;
+          `);
+
+          const rows = tableToObjects(table, table.schema.fields, Infinity);
+          const trackPoints = [];
+          let minTime = Infinity;
+          let maxTime = -Infinity;
+
+          for (const row of rows) {
+            const lat = Number(row.latitude);
+            const lon = Number(row.longitude);
+            const time = Number(row.position_time);
+            if (Number.isFinite(lat) && Number.isFinite(lon) && Number.isFinite(time)) {
+              trackPoints.push({ latitude: lat, longitude: lon, position_time: time });
+              minTime = Math.min(minTime, time);
+              maxTime = Math.max(maxTime, time);
+            }
+          }
+
+          selectedShipTrackData = trackPoints;
+          selectedShipTrackLayer = createTrackLayer(trackPoints, minTime, maxTime);
+
+          const shipName = shipRow.name || `MMSI ${mmsi}`;
+          if (trackPoints.length === 0) {
+            setMapStatus(`No track data found for ${shipName} in the last 4 hours.`);
+          } else {
+            setMapStatus(`Showing ${trackPoints.length.toLocaleString()} track points for ${shipName} over the last 4 hours. Click the ship again to hide.`);
+          }
+
+          rerenderActiveViewportLayers();
+        } catch (error) {
+          console.error(`Failed to load track for MMSI ${mmsi}:`, error);
+          setMapStatus(`Failed to load track for MMSI ${mmsi}.`);
+        }
+      }
+
+      function clearShipTrack() {
+        selectedShipMmsi = null;
+        selectedShipTrackData = [];
+        selectedShipTrackLayer = null;
+        rerenderActiveViewportLayers();
+      }
+
+      function createTrackLayer(trackPoints, minTime, maxTime) {
+        if (trackPoints.length < 2) return null;
+
+        const timeRange = maxTime - minTime || 1;
+
+        const segments = [];
+        for (let i = 0; i < trackPoints.length - 1; i++) {
+          const p0 = trackPoints[i];
+          const p1 = trackPoints[i + 1];
+          const avgTime = (p0.position_time + p1.position_time) / 2;
+          const timeFraction = (avgTime - minTime) / timeRange;
+          const alpha = 0.3 + timeFraction * 0.7;
+
+          segments.push({
+            path: [[p0.longitude, p0.latitude], [p1.longitude, p1.latitude]],
+            timeFraction,
+            alpha,
+          });
+        }
+
+        return new window.deck.PathLayer({
+          id: "ship-track",
+          data: segments,
+          getPath: (d) => d.path,
+          getColor: (d) => {
+            const darkBlue = [10, 20, 60];
+            return [...darkBlue, Math.round(d.alpha * 255)];
+          },
+          getWidth: 3,
+          widthMinPixels: 2,
+          widthMaxPixels: 4,
+          widthUnits: "pixels",
+          pickable: false,
+        });
+      }
+
       function rerenderActiveViewportLayers() {
         if (!hasDeckRenderer() || !window.deck) return;
+        const layers = [...createDensityBitmapLayers()];
+        if (selectedShipTrackLayer) layers.push(selectedShipTrackLayer);
         if (activeViewportMode === "ships") {
-          setDeckLayers([...createDensityBitmapLayers(), createShipGlyphLayer(currentViewportShipRows)], getShipLayerProps());
-        } else {
-          setDeckLayers(createDensityBitmapLayers());
+          layers.push(createShipGlyphLayer(currentViewportShipRows));
         }
+        setDeckLayers(layers, getShipLayerProps());
       }
 
       function renderViewportShips(rows, elapsedMs) {
@@ -1593,10 +1729,11 @@
         currentViewportShipRows = rows;
         beginDensityTileRender();
 
-        setDeckLayers(
-          [...createDensityBitmapLayers(), createShipGlyphLayer(rows)],
-          getShipLayerProps(),
-        );
+        const layers = [...createDensityBitmapLayers()];
+        if (selectedShipTrackLayer) layers.push(selectedShipTrackLayer);
+        layers.push(createShipGlyphLayer(rows));
+
+        setDeckLayers(layers, getShipLayerProps());
 
         setMapStatus(
           `Rendered ${rows.length.toLocaleString()} visible ships as GPU-instanced circles from ${latestShipCount.toLocaleString()} latest positions. Query/render: ${elapsedMs.toFixed(1)} ms.`,
