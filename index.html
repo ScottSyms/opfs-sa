@@ -949,6 +949,10 @@
           FROM test_parquet
           WHERE mmsi IS NOT NULL
             AND trim(mmsi) <> ''
+            AND latitude IS NOT NULL
+            AND longitude IS NOT NULL
+            AND latitude != 0
+            AND longitude != 0
             AND latitude BETWEEN -90 AND 90
             AND longitude BETWEEN -180 AND 180
             AND satellite_acquisition_time IS NOT NULL
@@ -1633,6 +1637,10 @@
             WHERE mmsi = '${mmsi}'
               AND position_time >= ${startTime}
               AND position_time <= ${positionTime}
+              AND latitude IS NOT NULL
+              AND longitude IS NOT NULL
+              AND latitude != 0
+              AND longitude != 0
             ORDER BY position_time;
           `);
 
