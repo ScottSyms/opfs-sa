@@ -93,6 +93,8 @@ This gives you:
 
 No need to install anything globally. The shell is isolated and reproducible — same environment on any machine with Nix.
 
+**First time with Nix/devenv?** See the official installation guide at <https://devenv.sh/getting-started/> for step-by-step instructions on installing Nix, enabling flakes, and installing devenv.
+
 ### Manual Setup
 
 ### Build WASM
