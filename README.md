@@ -8,10 +8,13 @@ In-Browser DuckDB fetches a Parquet file (e.g., AIS ship position data) once and
 
 - **Aggregate density tiles** (zoom levels 0–20): Renders point density as Datashader-style raster tiles computed in Rust/WASM. Fractional zoom levels round up to the next whole zoom, with higher-zoom tiles layered on top for better resolution.
 - **Ship circles** (zoom 8+): Shows individual ship positions as GPU-instanced circles with white borders, color-coded by speed.
+- **Ship track visualization** (zoom 8+): Click any ship circle to see its 4-hour track with time-based color fading. Click again to hide.
 
 ## Key Features
 
 - **OPFS-backed data** — Parquet files stored in the browser's Origin Private File System; fetch once, query forever with zero server cost
+- **Smart caching** — on each page load, a HEAD request checks if the remote file has changed (by size or modification time). The download is skipped if the cached copy is current, saving bandwidth and load time.
+- **Cached indexes** — expensive aggregation queries (`ais_latest_positions`) are exported to Parquet and stored in OPFS. On subsequent visits, cached indexes load in seconds instead of rebuilding from the raw 9.7M-row source file.
 - **9.7M+ points** rendered smoothly using a 512×512 uniform grid spatial index in Rust
 - **Web Worker offload** — tile rendering runs off the main thread so the UI stays responsive
 - **Double-buffered tile transitions** with crossfade for smooth zoom/pan
@@ -20,6 +23,7 @@ In-Browser DuckDB fetches a Parquet file (e.g., AIS ship position data) once and
 - **Aggregate opacity slider** and zoom level display
 - **Ad-hoc SQL queries** via DuckDB-WASM against the local Parquet file (does not affect the map)
 - **Kepler.gl** integration for query result visualization
+- **Remote HTTP fallback** — if OPFS is unavailable, queries the remote file directly over HTTP with range request support
 
 ## Architecture
 
@@ -63,7 +67,7 @@ In-Browser DuckDB fetches a Parquet file (e.g., AIS ship position data) once and
 
 ### Remote HTTP Fallback
 
-If the Parquet file cannot be downloaded to OPFS (e.g., CORS restrictions, no OPFS support, or network issues), the app automatically falls back to querying the remote file directly over HTTP. All in-memory tables (`ais_position_points`, `ais_latest_positions`, `ais_track_points`) are still built, so the density tiles and ship tracks work identically. The tradeoff is slower initial load and no persistence across page reloads.
+If the Parquet file cannot be downloaded to OPFS (e.g., CORS restrictions, no OPFS support, or network issues), the app automatically falls back to querying the remote file directly over HTTP. DuckDB-WASM's `httpfs` extension uses HTTP range requests to download only the parts of the Parquet file needed for each query, dramatically reducing bandwidth for selective queries. All in-memory tables are still built, so density tiles and ship tracks work identically. The tradeoff is slower initial load and no persistence across page reloads.
 
 ## Building
 
@@ -100,7 +104,12 @@ cp target/wasm32-unknown-unknown/release/ducklake_wasm_density.wasm density_engi
 
 ### Run
 
-Serve the project directory with any static file server (e.g., `python -m http.server 8080`) and open `index.html`. The default query expects a `test.parquet` file available at `http://localhost:8080/test.parquet`.
+Serve the project directory with any static file server (e.g., `python -m http.server 8080`) and open `index.html`. The default query expects a `test.parquet` file available at the same origin (e.g., `http://localhost:8080/test.parquet`).
+
+**Server requirements for remote fallback:**
+- Must support HTTP Range requests (`Accept-Ranges: bytes` header)
+- Must serve the Parquet file with appropriate CORS headers if accessed from a different origin
+- Python's built-in `http.server` supports range requests natively
 
 ## Configuration Constants
 
