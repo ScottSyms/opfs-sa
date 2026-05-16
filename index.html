@@ -938,27 +938,6 @@
         const reportCountTable = await conn.query("SELECT count(*) AS report_count FROM ais_position_points;");
         const reportCountRows = tableToObjects(reportCountTable, reportCountTable.schema.fields, 1);
         validPositionReportCount = Number(reportCountRows[0]?.report_count ?? 0);
-
-        await conn.query(`
-          CREATE OR REPLACE TABLE ais_track_points AS
-          SELECT
-            trim(mmsi) AS mmsi,
-            CAST(latitude AS DOUBLE) AS latitude,
-            CAST(longitude AS DOUBLE) AS longitude,
-            TRY_CAST(trim(satellite_acquisition_time) AS BIGINT) AS position_time
-          FROM test_parquet
-          WHERE mmsi IS NOT NULL
-            AND trim(mmsi) <> ''
-            AND latitude IS NOT NULL
-            AND longitude IS NOT NULL
-            AND latitude != 0
-            AND longitude != 0
-            AND latitude BETWEEN -90 AND 90
-            AND longitude BETWEEN -180 AND 180
-            AND satellite_acquisition_time IS NOT NULL
-          ORDER BY mmsi, position_time;
-        `);
-
         await loadDensityPointsIntoWasm();
         aisSpatialReady = true;
       }
@@ -1557,33 +1536,63 @@
         return Math.min(250_000, Math.max(5_000, extentMeters / 80));
       }
 
-      function getShipColor(row) {
-        const speed = Number(row.speed_over_ground);
-        if (Number.isFinite(speed) && speed <= 1) return [91, 141, 239, 210];
-        if (Number.isFinite(speed) && speed >= 50) return [255, 184, 77, 230];
-        return [87, 221, 181, 220];
+      function createShipArrowIcon() {
+        const size = 32;
+        const canvas = document.createElement("canvas");
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext("2d");
+        ctx.clearRect(0, 0, size, size);
+
+        const cx = size / 2;
+        const tipY = 4;
+        const baseY = size - 4;
+        const halfWidth = 6;
+
+        ctx.beginPath();
+        ctx.moveTo(cx, tipY);
+        ctx.lineTo(cx - halfWidth, baseY);
+        ctx.lineTo(cx + halfWidth, baseY);
+        ctx.closePath();
+
+        ctx.fillStyle = "white";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(0,0,0,0.6)";
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        return canvas.toDataURL();
       }
 
+      let shipArrowIcon = null;
+
       function createShipGlyphLayer(rows) {
-        return new window.deck.ScatterplotLayer({
-          id: "viewport-ship-circles",
+        if (!shipArrowIcon) shipArrowIcon = createShipArrowIcon();
+
+        return new window.deck.IconLayer({
+          id: "viewport-ship-arrows",
           data: rows,
-          filled: true,
-          getFillColor: getShipColor,
-          getLineColor: [255, 255, 255, 235],
-          getPosition: (row) => [Number(row.longitude), Number(row.latitude)],
-          getRadius: (row) => {
-            const speed = Number(row.speed_over_ground);
-            return Number.isFinite(speed) && speed > 1 ? 5 : 4;
+          iconAtlas: shipArrowIcon,
+          iconMapping: {
+            arrow: { x: 0, y: 0, width: 32, height: 32, mask: false },
           },
-          lineWidthMinPixels: 1.5,
-          lineWidthUnits: "pixels",
-          opacity: 0.9,
+          getIcon: () => "arrow",
+          getPosition: (row) => [Number(row.longitude), Number(row.latitude)],
+          getSize: (row) => {
+            const speed = Number(row.speed_over_ground);
+            return Number.isFinite(speed) && speed > 1 ? 12 : 10;
+          },
+          getAngle: (row) => {
+            const cog = Number(row.course_over_ground);
+            if (Number.isFinite(cog) && cog >= 0 && cog <= 360) {
+              return (cog * Math.PI) / 180;
+            }
+            return 0;
+          },
+          sizeUnits: "pixels",
+          sizeScale: 1,
           pickable: true,
-          radiusMaxPixels: 9,
-          radiusMinPixels: 4,
-          radiusUnits: "pixels",
-          stroked: true,
+          opacity: 0.9,
         });
       }
 
@@ -1632,15 +1641,18 @@
 
         try {
           const table = await conn.query(`
-            SELECT latitude, longitude, position_time
-            FROM ais_track_points
-            WHERE mmsi = '${mmsi}'
-              AND position_time >= ${startTime}
-              AND position_time <= ${positionTime}
+            SELECT latitude, longitude, TRY_CAST(trim(satellite_acquisition_time) AS BIGINT) AS position_time
+            FROM test_parquet
+            WHERE trim(mmsi) = '${mmsi}'
+              AND satellite_acquisition_time IS NOT NULL
               AND latitude IS NOT NULL
               AND longitude IS NOT NULL
               AND latitude != 0
               AND longitude != 0
+              AND CAST(latitude AS DOUBLE) BETWEEN -90 AND 90
+              AND CAST(longitude AS DOUBLE) BETWEEN -180 AND 180
+              AND TRY_CAST(trim(satellite_acquisition_time) AS BIGINT) >= ${startTime}
+              AND TRY_CAST(trim(satellite_acquisition_time) AS BIGINT) <= ${positionTime}
             ORDER BY position_time;
           `);
 
