@@ -672,6 +672,102 @@
         }
       }
 
+      const CACHED_TABLES = ["ais_position_points", "ais_latest_positions"];
+      const CACHE_METADATA_FILE = "cache_metadata.json";
+
+      async function getCachedTableMetadata() {
+        try {
+          const root = await navigator.storage.getDirectory();
+          const handle = await root.getFileHandle(CACHE_METADATA_FILE);
+          const file = await handle.getFile();
+          const text = await file.text();
+          return JSON.parse(text);
+        } catch {
+          return null;
+        }
+      }
+
+      async function saveCachedTableMetadata(metadata) {
+        const root = await navigator.storage.getDirectory();
+        const handle = await root.getFileHandle(CACHE_METADATA_FILE, { create: true });
+        const writable = await handle.createWritable();
+        await writable.write(JSON.stringify(metadata));
+        await writable.close();
+      }
+
+      async function tablesAreCached(conn, sourceMetadata) {
+        const cached = await getCachedTableMetadata();
+        if (!cached) return false;
+        if (cached.sourceSize !== sourceMetadata.size) return false;
+        if (cached.sourceModified !== sourceMetadata.modified) return false;
+
+        const root = await navigator.storage.getDirectory();
+        for (const table of CACHED_TABLES) {
+          try {
+            await root.getFileHandle(`${table}.parquet`);
+          } catch {
+            return false;
+          }
+        }
+
+        return true;
+      }
+
+      async function loadCachedTables(conn, db, duckdb) {
+        setStatus("Loading cached indexes from OPFS...");
+        const root = await navigator.storage.getDirectory();
+
+        for (const table of CACHED_TABLES) {
+          const fileName = `${table}.parquet`;
+          const handle = await root.getFileHandle(fileName);
+          await db.registerFileHandle(fileName, handle, duckdb.DuckDBDataProtocol.BROWSER_FSACCESS, true);
+          await conn.query(`CREATE OR REPLACE TABLE ${table} AS SELECT * FROM '${fileName}';`);
+        }
+
+        const countTable = await conn.query("SELECT count(*) AS ship_count FROM ais_latest_positions;");
+        const countRows = tableToObjects(countTable, countTable.schema.fields, 1);
+        latestShipCount = Number(countRows[0]?.ship_count ?? 0);
+        const reportCountTable = await conn.query("SELECT count(*) AS report_count FROM ais_position_points;");
+        const reportCountRows = tableToObjects(reportCountTable, reportCountTable.schema.fields, 1);
+        validPositionReportCount = Number(reportCountRows[0]?.report_count ?? 0);
+      }
+
+      async function exportCachedTables(conn, db, duckdb, sourceMetadata) {
+        setStatus("Building indexes and caching to OPFS...");
+
+        const root = await navigator.storage.getDirectory();
+
+        for (const table of CACHED_TABLES) {
+          const fileName = `${table}.parquet`;
+          await conn.query(`COPY ${table} TO '${fileName}' (FORMAT PARQUET);`);
+
+          const result = await conn.query(`SELECT * FROM read_parquet('${fileName}') LIMIT 0;`);
+          const arrowData = await result.toArray();
+          if (arrowData.length === 0) {
+            const blob = new Blob([result.arrowBuffer], { type: "application/octet-stream" });
+            const handle = await root.getFileHandle(fileName, { create: true });
+            const writable = await handle.createWritable();
+            await writable.write(blob);
+            await writable.close();
+          }
+        }
+
+        await saveCachedTableMetadata(sourceMetadata);
+      }
+
+      async function getSourceMetadata(url) {
+        try {
+          const headResponse = await fetch(url, { method: "HEAD" });
+          if (!headResponse.ok) return null;
+          return {
+            size: headResponse.headers.get("content-length"),
+            modified: headResponse.headers.get("last-modified"),
+          };
+        } catch {
+          return null;
+        }
+      }
+
       async function createDensityWasmEngine() {
         const response = await fetch(DENSITY_WASM_URL);
         if (!response.ok) {
@@ -962,6 +1058,17 @@
           GROUP BY mmsi;
         `);
 
+        const countTable = await conn.query("SELECT count(*) AS ship_count FROM ais_latest_positions;");
+        const countRows = tableToObjects(countTable, countTable.schema.fields, 1);
+        latestShipCount = Number(countRows[0]?.ship_count ?? 0);
+        const reportCountTable = await conn.query("SELECT count(*) AS report_count FROM ais_position_points;");
+        const reportCountRows = tableToObjects(reportCountTable, reportCountTable.schema.fields, 1);
+        validPositionReportCount = Number(reportCountRows[0]?.report_count ?? 0);
+        await loadDensityPointsIntoWasm();
+        aisSpatialReady = true;
+      }
+
+      async function loadCachedAisData() {
         const countTable = await conn.query("SELECT count(*) AS ship_count FROM ais_latest_positions;");
         const countRows = tableToObjects(countTable, countTable.schema.fields, 1);
         latestShipCount = Number(countRows[0]?.ship_count ?? 0);
@@ -1962,6 +2069,7 @@
         let dataMode = "opfs";
         let fileHandle = null;
         let cacheStatus = "";
+        let indexCacheStatus = "";
 
         try {
           if (!navigator.storage?.getDirectory) {
@@ -1984,11 +2092,26 @@
           await db.registerFileHandle(OPFS_FILE_NAME, fileHandle, duckdb.DuckDBDataProtocol.BROWSER_FSACCESS, true);
           conn = await db.connect();
           await conn.query(`CREATE OR REPLACE VIEW test_parquet AS SELECT * FROM '${OPFS_FILE_NAME}';`);
+
+          const sourceMetadata = await getSourceMetadata(SOURCE_URL);
+          const cached = await tablesAreCached(conn, sourceMetadata);
+
+          if (cached) {
+            await loadCachedTables(conn, db, duckdb);
+            indexCacheStatus = "loaded";
+          } else {
+            await prepareAisSpatialData();
+            if (sourceMetadata) {
+              await exportCachedTables(conn, db, duckdb, sourceMetadata);
+              indexCacheStatus = "built";
+            }
+          }
         } catch (opfsError) {
           console.warn("OPFS failed, falling back to remote HTTP:", opfsError);
           dataMode = "remote";
           conn = await db.connect();
           await conn.query(`CREATE OR REPLACE VIEW test_parquet AS SELECT * FROM '${REMOTE_URL}';`);
+          await prepareAisSpatialData();
         }
 
         await prepareAisSpatialData();
@@ -1999,8 +2122,9 @@
         runButton.disabled = false;
         if (dataMode === "opfs") {
           const cacheMsg = cacheStatus === "updated" ? " (downloaded)" : " (cached)";
+          const indexMsg = indexCacheStatus === "loaded" ? " (indexes loaded from cache)" : indexCacheStatus === "built" ? " (indexes built and cached)" : "";
           setStatus(
-            `Ready. ${OPFS_FILE_NAME} is stored in OPFS${cacheMsg}; ${validPositionReportCount.toLocaleString()} AIS reports and ${latestShipCount.toLocaleString()} latest ship positions are prepared.`,
+            `Ready. ${OPFS_FILE_NAME} is stored in OPFS${cacheMsg}${indexMsg}; ${validPositionReportCount.toLocaleString()} AIS reports and ${latestShipCount.toLocaleString()} latest ship positions are prepared.`,
           );
         } else {
           setStatus(
