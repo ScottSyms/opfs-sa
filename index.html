@@ -1543,79 +1543,26 @@
         return [87, 221, 181, 220];
       }
 
-      let shipArrowIconImage = null;
-      let shipArrowIconLoaded = false;
-      let shipArrowIconLoadPromise = null;
-
-      function createShipArrowIcon() {
-        if (shipArrowIconLoadPromise) return shipArrowIconLoadPromise;
-
-        shipArrowIconLoadPromise = new Promise((resolve) => {
-          const size = 64;
-          const canvas = document.createElement("canvas");
-          canvas.width = size;
-          canvas.height = size;
-          const ctx = canvas.getContext("2d");
-          ctx.clearRect(0, 0, size, size);
-
-          const cx = size / 2;
-          const tipY = 8;
-          const baseY = size - 8;
-          const halfWidth = 10;
-
-          ctx.beginPath();
-          ctx.moveTo(cx, tipY);
-          ctx.lineTo(cx - halfWidth, baseY);
-          ctx.lineTo(cx + halfWidth, baseY);
-          ctx.closePath();
-
-          ctx.fillStyle = "white";
-          ctx.fill();
-          ctx.strokeStyle = "rgba(0,0,0,0.7)";
-          ctx.lineWidth = 2;
-          ctx.stroke();
-
-          const img = new Image();
-          img.onload = () => {
-            shipArrowIconImage = img;
-            shipArrowIconLoaded = true;
-            resolve();
-          };
-          img.src = canvas.toDataURL();
-        });
-
-        return shipArrowIconLoadPromise;
-      }
-
-      async function createShipGlyphLayer(rows) {
-        if (!shipArrowIconLoaded) {
-          await createShipArrowIcon();
-        }
-
-        return new window.deck.IconLayer({
+      function createShipGlyphLayer(rows) {
+        return new window.deck.ScatterplotLayer({
           id: "viewport-ship-arrows",
           data: rows,
-          iconAtlas: shipArrowIconImage,
-          iconMapping: {
-            arrow: { x: 0, y: 0, width: 64, height: 64, anchorX: 32, anchorY: 32, mask: false },
-          },
-          getIcon: () => "arrow",
+          filled: true,
+          getFillColor: getShipColor,
+          getLineColor: [255, 255, 255, 235],
           getPosition: (row) => [Number(row.longitude), Number(row.latitude)],
-          getSize: (row) => {
+          getRadius: (row) => {
             const speed = Number(row.speed_over_ground);
-            return Number.isFinite(speed) && speed > 1 ? 14 : 10;
+            return Number.isFinite(speed) && speed > 1 ? 5 : 4;
           },
-          getAngle: (row) => {
-            const cog = Number(row.course_over_ground);
-            if (Number.isFinite(cog) && cog >= 0 && cog <= 360) {
-              return (cog * Math.PI) / 180;
-            }
-            return 0;
-          },
-          sizeUnits: "pixels",
-          sizeScale: 1,
+          lineWidthMinPixels: 1.5,
+          lineWidthUnits: "pixels",
+          opacity: 0.9,
           pickable: true,
-          opacity: 0.95,
+          radiusMaxPixels: 9,
+          radiusMinPixels: 4,
+          radiusUnits: "pixels",
+          stroked: true,
         });
       }
 
@@ -1755,18 +1702,17 @@
         });
       }
 
-      async function rerenderActiveViewportLayers() {
+      function rerenderActiveViewportLayers() {
         if (!hasDeckRenderer() || !window.deck) return;
         const layers = [...createDensityBitmapLayers()];
         if (selectedShipTrackLayer) layers.push(selectedShipTrackLayer);
         if (activeViewportMode === "ships") {
-          const shipLayer = await createShipGlyphLayer(currentViewportShipRows);
-          layers.push(shipLayer);
+          layers.push(createShipGlyphLayer(currentViewportShipRows));
         }
         setDeckLayers(layers, getShipLayerProps());
       }
 
-      async function renderViewportShips(rows, elapsedMs) {
+      function renderViewportShips(rows, elapsedMs) {
         if (!hasDeckRenderer() || !window.deck) return;
 
         activeViewportMode = "ships";
@@ -1775,13 +1721,12 @@
 
         const layers = [...createDensityBitmapLayers()];
         if (selectedShipTrackLayer) layers.push(selectedShipTrackLayer);
-        const shipLayer = await createShipGlyphLayer(rows);
-        layers.push(shipLayer);
+        layers.push(createShipGlyphLayer(rows));
 
         setDeckLayers(layers, getShipLayerProps());
 
         setMapStatus(
-          `Rendered ${rows.length.toLocaleString()} visible ships as GPU-instanced arrows from ${latestShipCount.toLocaleString()} latest positions. Query/render: ${elapsedMs.toFixed(1)} ms.`,
+          `Rendered ${rows.length.toLocaleString()} visible ships as GPU-instanced circles from ${latestShipCount.toLocaleString()} latest positions. Query/render: ${elapsedMs.toFixed(1)} ms.`,
         );
       }
 
