@@ -341,6 +341,7 @@
     <script type="module">
       const DUCKDB_WASM_VERSION = "1.33.1-dev45.0";
       const SOURCE_URL = "/test.parquet";
+      const REMOTE_URL = window.location.origin + SOURCE_URL;
       const OPFS_FILE_NAME = "test.parquet";
       const DENSITY_WASM_URL = "./density_engine.wasm";
       const DENSITY_WORKER_URL = "./density_worker.js";
@@ -1942,7 +1943,7 @@
           console.warn("OPFS fetch failed, falling back to remote HTTP:", opfsError);
           dataMode = "remote";
           conn = await db.connect();
-          await conn.query(`CREATE OR REPLACE VIEW test_parquet AS SELECT * FROM '${SOURCE_URL}';`);
+          await conn.query(`CREATE OR REPLACE VIEW test_parquet AS SELECT * FROM '${REMOTE_URL}';`);
         }
 
         await prepareAisSpatialData();
@@ -1957,7 +1958,7 @@
           );
         } else {
           setStatus(
-            `Ready. Running from remote ${SOURCE_URL}; ${validPositionReportCount.toLocaleString()} AIS reports and ${latestShipCount.toLocaleString()} latest ship positions are prepared. Data is not cached locally.`,
+            `Ready. Running from remote ${REMOTE_URL}; ${validPositionReportCount.toLocaleString()} AIS reports and ${latestShipCount.toLocaleString()} latest ship positions are prepared. Data is not cached locally.`,
           );
         }
         setResults("Ready. Run the default query or enter your own SQL against test_parquet or 'test.parquet'. Aggregate zooms use dynamic raster density tiles; close zooms use viewport ship circles.");
