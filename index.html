@@ -643,6 +643,35 @@
         return fileHandle;
       }
 
+      async function needsOPFSUpdate(url, fileName) {
+        try {
+          const headResponse = await fetch(url, { method: "HEAD" });
+          if (!headResponse.ok) return true;
+
+          const remoteSize = headResponse.headers.get("content-length");
+          const remoteModified = headResponse.headers.get("last-modified");
+
+          const root = await navigator.storage.getDirectory();
+          try {
+            const localHandle = await root.getFileHandle(fileName);
+            const localFile = await localHandle.getFile();
+
+            if (remoteSize && localFile.size !== Number(remoteSize)) return true;
+            if (remoteModified) {
+              const remoteDate = new Date(remoteModified).getTime();
+              if (Math.abs(remoteDate - localFile.lastModified) > 1000) return true;
+            }
+
+            return false;
+          } catch {
+            return true;
+          }
+        } catch (error) {
+          console.warn("Metadata check failed, downloading file:", error);
+          return true;
+        }
+      }
+
       async function createDensityWasmEngine() {
         const response = await fetch(DENSITY_WASM_URL);
         if (!response.ok) {
@@ -1932,15 +1961,31 @@
 
         let dataMode = "opfs";
         let fileHandle = null;
+        let cacheStatus = "";
 
         try {
-          setStatus(`Fetching ${SOURCE_URL} to OPFS...`);
-          fileHandle = await fetchToOPFS(SOURCE_URL, OPFS_FILE_NAME);
+          if (!navigator.storage?.getDirectory) {
+            throw new Error("OPFS is not available in this browser.");
+          }
+
+          setStatus(`Checking local cache for ${OPFS_FILE_NAME}...`);
+          const shouldUpdate = await needsOPFSUpdate(SOURCE_URL, OPFS_FILE_NAME);
+
+          if (shouldUpdate) {
+            setStatus(`Downloading ${SOURCE_URL} to OPFS...`);
+            fileHandle = await fetchToOPFS(SOURCE_URL, OPFS_FILE_NAME);
+            cacheStatus = "updated";
+          } else {
+            const root = await navigator.storage.getDirectory();
+            fileHandle = await root.getFileHandle(OPFS_FILE_NAME);
+            cacheStatus = "current";
+          }
+
           await db.registerFileHandle(OPFS_FILE_NAME, fileHandle, duckdb.DuckDBDataProtocol.BROWSER_FSACCESS, true);
           conn = await db.connect();
           await conn.query(`CREATE OR REPLACE VIEW test_parquet AS SELECT * FROM '${OPFS_FILE_NAME}';`);
         } catch (opfsError) {
-          console.warn("OPFS fetch failed, falling back to remote HTTP:", opfsError);
+          console.warn("OPFS failed, falling back to remote HTTP:", opfsError);
           dataMode = "remote";
           conn = await db.connect();
           await conn.query(`CREATE OR REPLACE VIEW test_parquet AS SELECT * FROM '${REMOTE_URL}';`);
@@ -1953,8 +1998,9 @@
 
         runButton.disabled = false;
         if (dataMode === "opfs") {
+          const cacheMsg = cacheStatus === "updated" ? " (downloaded)" : " (cached)";
           setStatus(
-            `Ready. ${OPFS_FILE_NAME} is stored in OPFS; ${validPositionReportCount.toLocaleString()} AIS reports and ${latestShipCount.toLocaleString()} latest ship positions are prepared.`,
+            `Ready. ${OPFS_FILE_NAME} is stored in OPFS${cacheMsg}; ${validPositionReportCount.toLocaleString()} AIS reports and ${latestShipCount.toLocaleString()} latest ship positions are prepared.`,
           );
         } else {
           setStatus(

@@ -58,6 +58,7 @@ In-Browser DuckDB fetches a Parquet file (e.g., AIS ship position data) once and
 - **Persistent** — data survives page reloads and browser restarts
 - **Sandboxed** — isolated per origin, no cross-site access
 - **Large files** — handles multi-gigabyte Parquet files that would exceed `localStorage` or `IndexedDB` limits
+- **Smart caching** — on each page load, a HEAD request checks if the remote file has changed (by size or modification time). The download is skipped if the cached copy is current, saving bandwidth and load time.
 
 ### Remote HTTP Fallback
 
