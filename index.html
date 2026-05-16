@@ -122,6 +122,11 @@
         accent-color: #ff35a0;
       }
 
+      .opacity-control input[type="checkbox"] {
+        width: auto;
+        accent-color: #8ab4f8;
+      }
+
       #aggregate-opacity-value {
         min-width: 4ch;
         color: #f5f5f5;
@@ -310,6 +315,10 @@
                 <span id="aggregate-opacity-value">50%</span>
               </label>
               <span id="zoom-status">Zoom --</span>
+              <label class="opacity-control" for="terrain-toggle">
+                <input id="terrain-toggle" type="checkbox" />
+                Terrain
+              </label>
               <span id="map-status">Run a query with latitude and longitude columns to map points.</span>
             </div>
           </div>
@@ -431,6 +440,8 @@
       let selectedShipMmsi = null;
       let selectedShipTrackData = [];
       let selectedShipTrackLayer = null;
+      let terrainEnabled = false;
+      let terrainInitialized = false;
 
       function setStatus(message) {
         status.textContent = message;
@@ -589,6 +600,63 @@
         render();
         new ResizeObserver(render).observe(keplerRenderer);
         setMapStatus("Run a query with latitude and longitude columns to map points.");
+      }
+
+      function initializeTerrain() {
+        if (terrainInitialized || !mapLibreMap) return;
+        terrainInitialized = true;
+
+        mapLibreMap.addSource("terrain-source", {
+          type: "raster-dem",
+          tiles: ["https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"],
+          tileSize: 256,
+          encoding: "terrarium",
+          maxzoom: 12,
+        });
+
+        mapLibreMap.addLayer(
+          {
+            id: "hillshade",
+            type: "hillshade",
+            source: "terrain-source",
+            paint: {
+              "hillshade-shadow-color": "#1a1a2e",
+              "hillshade-highlight-color": "#ffffff",
+              "hillshade-exaggeration": 0.4,
+            },
+          },
+          "waterway-label",
+        );
+
+        mapLibreMap.addLayer({
+          id: "sky",
+          type: "sky",
+          paint: {
+            "sky-type": "atmosphere",
+            "sky-atmosphere-sun": [0, 90],
+            "sky-atmosphere-sun-intensity": 15,
+          },
+        });
+
+        mapLibreMap.setTerrain({ source: "terrain-source", exaggeration: 1.2 });
+      }
+
+      function toggleTerrain(enabled) {
+        terrainEnabled = enabled;
+        if (enabled) {
+          initializeTerrain();
+          if (mapLibreMap) {
+            mapLibreMap.setTerrain({ source: "terrain-source", exaggeration: 1.2 });
+            mapLibreMap.setLayoutProperty("hillshade", "visibility", "visible");
+            mapLibreMap.setLayoutProperty("sky", "visibility", "visible");
+          }
+        } else {
+          if (mapLibreMap) {
+            mapLibreMap.setTerrain(null);
+            mapLibreMap.setLayoutProperty("hillshade", "visibility", "none");
+            mapLibreMap.setLayoutProperty("sky", "visibility", "none");
+          }
+        }
       }
 
       try {
@@ -2144,6 +2212,10 @@
         aggregateOpacity = Number(aggregateOpacityInput.value) / 100;
         updateAggregateOpacityStatus();
         rerenderActiveViewportLayers();
+      });
+      const terrainToggleInput = document.querySelector("#terrain-toggle");
+      terrainToggleInput.addEventListener("change", () => {
+        toggleTerrain(terrainToggleInput.checked);
       });
       queryInput.addEventListener("keydown", (event) => {
         if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
