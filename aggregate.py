@@ -12,7 +12,7 @@ Usage:
     python aggregate.py [source.parquet] [output_dir]
 
 Defaults:
-    source.parquet = test.parquet (in current directory)
+    source.parquet = ~/code/data/mc/mcdec/parquet/ais_2024.parquet (in home directory)
     output_dir     = . (current directory)
 
 Requires: duckdb (pip install duckdb)
@@ -27,7 +27,7 @@ MERCATOR_MAX_LATITUDE = 85.05112878
 
 
 def main():
-    source_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("test.parquet")
+    source_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path.home() / "code/data/mc/mcdec/parquet/ais_2024.parquet"
     output_dir = Path(sys.argv[2]) if len(sys.argv) > 2 else Path(".")
 
     if not source_path.exists():
