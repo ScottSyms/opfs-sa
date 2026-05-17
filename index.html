@@ -762,7 +762,9 @@
         try {
           const root = await navigator.storage.getDirectory();
           for (const name of PRE_AGGREGATED_FILES) {
-            await root.getFileHandle(name);
+            const handle = await root.getFileHandle(name);
+            const file = await handle.getFile();
+            if (file.size < 100) return false;
           }
           return true;
         } catch {
@@ -805,6 +807,13 @@
 
         for (const fileName of PRE_AGGREGATED_FILES) {
           const handle = await root.getFileHandle(fileName);
+          const file = await handle.getFile();
+          console.log(`Loading ${fileName}: ${(file.size / 1024 / 1024).toFixed(1)} MB`);
+          if (file.size < 100) {
+            console.warn(`${fileName} too small (${file.size} bytes), deleting corrupted file...`);
+            await root.removeEntry(fileName);
+            throw new Error(`${fileName} corrupted (too small), needs re-download`);
+          }
           await db.registerFileHandle(fileName, handle, duckdb.DuckDBDataProtocol.BROWSER_FSACCESS, true);
           const tableName = fileName.replace(".parquet", "");
           await conn.query(`CREATE OR REPLACE TABLE ${tableName} AS SELECT * FROM '${fileName}';`);
@@ -2165,8 +2174,20 @@
 
           // ── Priority 1: Pre-aggregated files already in OPFS ──────────────
           if (await hasPreAggregatedFiles()) {
-            await loadPreAggregatedFiles(db, duckdb);
-            loadMode = "pre-aggregated-cached";
+            try {
+              await loadPreAggregatedFiles(db, duckdb);
+              loadMode = "pre-aggregated-cached";
+            } catch (loadError) {
+              console.warn("Cached pre-aggregated files failed to load, re-downloading:", loadError);
+              // Delete any remaining corrupted files
+              for (const name of PRE_AGGREGATED_FILES) {
+                try { await root.removeEntry(name); } catch {}
+              }
+              // Fall through to Priority 2 to re-download
+              await downloadPreAggregatedFiles();
+              await loadPreAggregatedFiles(db, duckdb);
+              loadMode = "pre-aggregated-downloaded";
+            }
           } else {
             // ── Priority 2: Download pre-aggregated files from server ───────
             try {
