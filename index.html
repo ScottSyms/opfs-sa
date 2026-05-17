@@ -320,7 +320,7 @@
           </div>
         </div>
         <label for="query">Query local OPFS parquet file <code>test.parquet</code></label>
-        <textarea id="query" spellcheck="false">SELECT MMSI, LAT, LON, VesselName, SOG, COG FROM test.parquet LIMIT 100;</textarea>
+        <textarea id="query" spellcheck="false">SELECT MMSI, LAT, LON, VesselName, SOG, COG FROM test_parquet LIMIT 100;</textarea>
         <div class="actions">
           <button id="run" type="button" disabled>Run Query</button>
           <div id="timing">No query run yet.</div>
@@ -2259,7 +2259,7 @@
           `${statusDetail}; ${validPositionReportCount.toLocaleString()} AIS positions and ${latestShipCount.toLocaleString()} latest ship positions are prepared.`,
         );
 
-        setResults("Ready. Run the default query or enter your own SQL against test_parquet or 'test.parquet'. Aggregate zooms use dynamic raster density tiles; close zooms use viewport ship heading glyphs.");
+        setResults("Ready. Run the default query or enter your own SQL against test_parquet. Aggregate zooms use dynamic raster density tiles; close zooms use viewport ship heading glyphs.");
         requestViewportRender(0);
       } catch (error) {
         console.error(error);
