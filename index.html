@@ -310,7 +310,7 @@
                 <span id="aggregate-opacity-value">50%</span>
               </label>
               <span id="zoom-status">Zoom --</span>
-              <span id="map-status">Run a query with latitude and longitude columns to map points.</span>
+              <span id="map-status">Run a query with LAT/LON columns to map points.</span>
             </div>
           </div>
           <div id="map">
@@ -320,7 +320,7 @@
           </div>
         </div>
         <label for="query">Query local OPFS parquet file <code>test.parquet</code></label>
-        <textarea id="query" spellcheck="false">SELECT mmsi, latitude, longitude, name, ship_type, navigation_status FROM test_parquet LIMIT 100;</textarea>
+        <textarea id="query" spellcheck="false">SELECT MMSI, LAT, LON, VesselName, SOG, COG FROM test_parquet LIMIT 100;</textarea>
         <div class="actions">
           <button id="run" type="button" disabled>Run Query</button>
           <div id="timing">No query run yet.</div>
@@ -588,7 +588,7 @@
 
         render();
         new ResizeObserver(render).observe(keplerRenderer);
-        setMapStatus("Run a query with latitude and longitude columns to map points.");
+        setMapStatus("Run a query with LAT/LON columns to map points.");
       }
 
       try {
@@ -1014,32 +1014,29 @@
         await conn.query(`
           CREATE OR REPLACE TABLE ais_position_points AS
           SELECT
-            CAST(latitude AS DOUBLE) AS latitude,
-            CAST(longitude AS DOUBLE) AS longitude
+            CAST(LAT AS DOUBLE) AS latitude,
+            CAST(LON AS DOUBLE) AS longitude
           FROM test_parquet
-          WHERE latitude BETWEEN ${-MERCATOR_MAX_LATITUDE} AND ${MERCATOR_MAX_LATITUDE}
-            AND longitude BETWEEN -180 AND 180;
+          WHERE LAT BETWEEN ${-MERCATOR_MAX_LATITUDE} AND ${MERCATOR_MAX_LATITUDE}
+            AND LON BETWEEN -180 AND 180;
         `);
 
         await conn.query(`
           CREATE OR REPLACE TABLE ais_latest_positions AS
           WITH valid AS (
             SELECT
-              trim(mmsi) AS mmsi,
-              CAST(latitude AS DOUBLE) AS latitude,
-              CAST(longitude AS DOUBLE) AS longitude,
-              TRY_CAST(trim(satellite_acquisition_time) AS BIGINT) AS position_time,
-              COALESCE(TRY_CAST(trim(satellite_acquisition_time) AS BIGINT), 0) AS position_rank,
-              CASE WHEN trim(name) <> '' THEN trim(name) ELSE NULL END AS name,
-              CASE WHEN trim(ship_type) <> '' THEN trim(ship_type) ELSE NULL END AS ship_type,
-              CASE WHEN trim(navigation_status) <> '' THEN trim(navigation_status) ELSE NULL END AS navigation_status,
-              TRY_CAST(trim(speed_over_ground) AS DOUBLE) AS speed_over_ground,
-              TRY_CAST(trim(course_over_ground) AS DOUBLE) AS raw_course_over_ground
+              CAST(MMSI AS VARCHAR) AS mmsi,
+              CAST(LAT AS DOUBLE) AS latitude,
+              CAST(LON AS DOUBLE) AS longitude,
+              extract(epoch from BaseDateTime) AS position_time,
+              COALESCE(extract(epoch from BaseDateTime), 0) AS position_rank,
+              CASE WHEN trim(VesselName) <> '' THEN trim(VesselName) ELSE NULL END AS name,
+              TRY_CAST(SOG AS DOUBLE) AS speed_over_ground,
+              TRY_CAST(COG AS DOUBLE) AS raw_course_over_ground
             FROM test_parquet
-            WHERE mmsi IS NOT NULL
-              AND trim(mmsi) <> ''
-              AND latitude BETWEEN -90 AND 90
-              AND longitude BETWEEN -180 AND 180
+            WHERE MMSI IS NOT NULL
+              AND LAT BETWEEN -90 AND 90
+              AND LON BETWEEN -180 AND 180
           )
           SELECT
             mmsi,
@@ -1047,8 +1044,6 @@
             arg_max(longitude, position_rank) AS longitude,
             max(position_time) AS position_time,
             arg_max(name, position_rank) AS name,
-            arg_max(ship_type, position_rank) AS ship_type,
-            arg_max(navigation_status, position_rank) AS navigation_status,
             arg_max(speed_over_ground, position_rank) AS speed_over_ground,
             CASE
               WHEN arg_max(raw_course_over_ground, position_rank) BETWEEN 0 AND 360 THEN arg_max(raw_course_over_ground, position_rank)
@@ -1088,8 +1083,6 @@
             longitude,
             position_time,
             name,
-            ship_type,
-            navigation_status,
             speed_over_ground,
             course_over_ground
           FROM ais_latest_positions
@@ -1724,8 +1717,6 @@
               text: [
                 row.name || `MMSI ${row.mmsi}`,
                 `MMSI: ${row.mmsi}`,
-                `Ship type: ${row.ship_type || "unknown"}`,
-                `Status: ${row.navigation_status || "unknown"}`,
               ].join("\n"),
             };
           },
@@ -1748,18 +1739,18 @@
 
         try {
           const table = await conn.query(`
-            SELECT latitude, longitude, TRY_CAST(trim(satellite_acquisition_time) AS BIGINT) AS position_time
+            SELECT CAST(LAT AS DOUBLE) AS latitude, CAST(LON AS DOUBLE) AS longitude, extract(epoch from BaseDateTime) AS position_time
             FROM test_parquet
-            WHERE trim(mmsi) = '${mmsi}'
-              AND satellite_acquisition_time IS NOT NULL
-              AND latitude IS NOT NULL
-              AND longitude IS NOT NULL
-              AND latitude != 0
-              AND longitude != 0
-              AND CAST(latitude AS DOUBLE) BETWEEN -90 AND 90
-              AND CAST(longitude AS DOUBLE) BETWEEN -180 AND 180
-              AND TRY_CAST(trim(satellite_acquisition_time) AS BIGINT) >= ${startTime}
-              AND TRY_CAST(trim(satellite_acquisition_time) AS BIGINT) <= ${positionTime}
+            WHERE CAST(MMSI AS VARCHAR) = '${mmsi}'
+              AND BaseDateTime IS NOT NULL
+              AND LAT IS NOT NULL
+              AND LON IS NOT NULL
+              AND LAT != 0
+              AND LON != 0
+              AND CAST(LAT AS DOUBLE) BETWEEN -90 AND 90
+              AND CAST(LON AS DOUBLE) BETWEEN -180 AND 180
+              AND extract(epoch from BaseDateTime) >= ${startTime}
+              AND extract(epoch from BaseDateTime) <= ${positionTime}
             ORDER BY position_time;
           `);
 
