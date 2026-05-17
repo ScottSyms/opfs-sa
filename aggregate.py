@@ -77,7 +77,8 @@ def main():
                 CASE WHEN trim(VesselType) <> '' THEN trim(VesselType) ELSE NULL END AS ship_type,
                 CASE WHEN trim(Status) <> '' THEN trim(Status) ELSE NULL END AS navigation_status,
                 TRY_CAST(SOG AS DOUBLE) AS speed_over_ground,
-                TRY_CAST(COG AS DOUBLE) AS raw_course_over_ground
+                TRY_CAST(COG AS DOUBLE) AS raw_course_over_ground,
+                TRY_CAST(Heading AS DOUBLE) AS heading
             FROM read_parquet('{source_path}')
             WHERE MMSI IS NOT NULL
               AND LAT BETWEEN -90 AND 90
@@ -96,7 +97,8 @@ def main():
                 WHEN arg_max(raw_course_over_ground, position_rank) BETWEEN 0 AND 360
                 THEN arg_max(raw_course_over_ground, position_rank)
                 ELSE NULL
-            END AS course_over_ground
+            END AS course_over_ground,
+            arg_max(heading, position_rank) AS heading
         FROM valid
         GROUP BY mmsi
     """)
