@@ -2183,6 +2183,15 @@
               }
             }
           }
+
+          // ── Ensure test_parquet view exists for ad-hoc queries and track lookups ──
+          if (loadMode.startsWith("pre-aggregated")) {
+            try {
+              await conn.query(`CREATE OR REPLACE VIEW test_parquet AS SELECT * FROM '${REMOTE_URL}';`);
+            } catch (httpError) {
+              console.warn("Could not register test.parquet via HTTP, ad-hoc queries against test_parquet will fail:", httpError);
+            }
+          }
         } catch (opfsError) {
           console.warn("OPFS failed, falling back to remote HTTP:", opfsError);
           dataMode = "remote";
