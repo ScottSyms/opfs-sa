@@ -343,6 +343,9 @@
       const SOURCE_URL = "/test.parquet";
       const REMOTE_URL = window.location.origin + SOURCE_URL;
       const OPFS_FILE_NAME = "test.parquet";
+      const PRE_AGGREGATED_FILES = ["ais_position_points.parquet", "ais_latest_positions.parquet"];
+      const PRE_AGGREGATED_SOURCE = "/ais_position_points.parquet";
+      const PRE_AGGREGATED_SHIP_SOURCE = "/ais_latest_positions.parquet";
       const DENSITY_WASM_URL = "./density_engine.wasm";
       const DENSITY_WORKER_URL = "./density_worker.js";
       const KEPLER_MAP_ID = "query-map";
@@ -753,6 +756,59 @@
         }
 
         await saveCachedTableMetadata(sourceMetadata);
+      }
+
+      async function hasPreAggregatedFiles() {
+        try {
+          const root = await navigator.storage.getDirectory();
+          for (const name of PRE_AGGREGATED_FILES) {
+            await root.getFileHandle(name);
+          }
+          return true;
+        } catch {
+          return false;
+        }
+      }
+
+      async function fetchFileToOPFS(url, fileName) {
+        const response = await fetch(url);
+        if (!response.ok) {
+          throw new Error(`Failed to fetch ${url}: ${response.status} ${response.statusText}`);
+        }
+        const root = await navigator.storage.getDirectory();
+        const fileHandle = await root.getFileHandle(fileName, { create: true });
+        const writable = await fileHandle.createWritable();
+        if (response.body) {
+          await response.body.pipeTo(writable);
+        } else {
+          await writable.write(await response.arrayBuffer());
+          await writable.close();
+        }
+        return fileHandle;
+      }
+
+      async function downloadPreAggregatedFiles() {
+        setStatus("Downloading pre-aggregated AIS data...");
+        const root = await navigator.storage.getDirectory();
+
+        for (let i = 0; i < PRE_AGGREGATED_FILES.length; i++) {
+          const fileName = PRE_AGGREGATED_FILES[i];
+          const sourceUrl = i === 0 ? PRE_AGGREGATED_SOURCE : PRE_AGGREGATED_SHIP_SOURCE;
+          setStatus(`Downloading ${fileName}...`);
+          await fetchFileToOPFS(sourceUrl, fileName);
+        }
+      }
+
+      async function loadPreAggregatedFiles(db, duckdb) {
+        setStatus("Loading pre-aggregated AIS data...");
+        const root = await navigator.storage.getDirectory();
+
+        for (const fileName of PRE_AGGREGATED_FILES) {
+          const handle = await root.getFileHandle(fileName);
+          await db.registerFileHandle(fileName, handle, duckdb.DuckDBDataProtocol.BROWSER_FSACCESS, true);
+          const tableName = fileName.replace(".parquet", "");
+          await conn.query(`CREATE OR REPLACE TABLE ${tableName} AS SELECT * FROM '${fileName}';`);
+        }
       }
 
       async function getSourceMetadata(url) {
@@ -2066,70 +2122,102 @@
         });
 
         let dataMode = "opfs";
+        let loadMode = "pre-aggregated";
         let fileHandle = null;
-        let cacheStatus = "";
-        let indexCacheStatus = "";
+        let statusDetail = "";
+
+        conn = await db.connect();
 
         try {
           if (!navigator.storage?.getDirectory) {
             throw new Error("OPFS is not available in this browser.");
           }
 
-          setStatus(`Checking local cache for ${OPFS_FILE_NAME}...`);
-          const shouldUpdate = await needsOPFSUpdate(SOURCE_URL, OPFS_FILE_NAME);
+          const root = await navigator.storage.getDirectory();
 
-          if (shouldUpdate) {
-            setStatus(`Downloading ${SOURCE_URL} to OPFS...`);
-            fileHandle = await fetchToOPFS(SOURCE_URL, OPFS_FILE_NAME);
-            cacheStatus = "updated";
+          // ── Priority 1: Pre-aggregated files already in OPFS ──────────────
+          if (await hasPreAggregatedFiles()) {
+            await loadPreAggregatedFiles(db, duckdb);
+            loadMode = "pre-aggregated-cached";
           } else {
-            const root = await navigator.storage.getDirectory();
-            fileHandle = await root.getFileHandle(OPFS_FILE_NAME);
-            cacheStatus = "current";
-          }
+            // ── Priority 2: Download pre-aggregated files from server ───────
+            try {
+              const posHead = await fetch(PRE_AGGREGATED_SOURCE, { method: "HEAD" });
+              const shipHead = await fetch(PRE_AGGREGATED_SHIP_SOURCE, { method: "HEAD" });
 
-          await db.registerFileHandle(OPFS_FILE_NAME, fileHandle, duckdb.DuckDBDataProtocol.BROWSER_FSACCESS, true);
-          conn = await db.connect();
-          await conn.query(`CREATE OR REPLACE VIEW test_parquet AS SELECT * FROM '${OPFS_FILE_NAME}';`);
+              if (posHead.ok && shipHead.ok) {
+                await downloadPreAggregatedFiles();
+                await loadPreAggregatedFiles(db, duckdb);
+                loadMode = "pre-aggregated-downloaded";
+              } else {
+                throw new Error("Pre-aggregated files not available on server");
+              }
+            } catch (preAggError) {
+              console.warn("Pre-aggregated files not available, falling back to raw Parquet:", preAggError);
 
-          const sourceMetadata = await getSourceMetadata(SOURCE_URL);
-          const cached = await tablesAreCached(conn, sourceMetadata);
+              // ── Priority 3: Fall back to raw test.parquet + browser aggregation ──
+              loadMode = "raw-browser-build";
+              setStatus(`Checking local cache for ${OPFS_FILE_NAME}...`);
+              const shouldUpdate = await needsOPFSUpdate(SOURCE_URL, OPFS_FILE_NAME);
 
-          if (cached) {
-            await loadCachedTables(conn, db, duckdb);
-            indexCacheStatus = "loaded";
-          } else {
-            await prepareAisSpatialData();
-            if (sourceMetadata) {
-              await exportCachedTables(conn, db, duckdb, sourceMetadata);
-              indexCacheStatus = "built";
+              if (shouldUpdate) {
+                setStatus(`Downloading ${SOURCE_URL} to OPFS...`);
+                fileHandle = await fetchToOPFS(SOURCE_URL, OPFS_FILE_NAME);
+              } else {
+                fileHandle = await root.getFileHandle(OPFS_FILE_NAME);
+              }
+
+              await db.registerFileHandle(OPFS_FILE_NAME, fileHandle, duckdb.DuckDBDataProtocol.BROWSER_FSACCESS, true);
+              await conn.query(`CREATE OR REPLACE VIEW test_parquet AS SELECT * FROM '${OPFS_FILE_NAME}';`);
+
+              const sourceMetadata = await getSourceMetadata(SOURCE_URL);
+              const cached = await tablesAreCached(conn, sourceMetadata);
+
+              if (cached) {
+                await loadCachedTables(conn, db, duckdb);
+              } else {
+                await prepareAisSpatialData();
+                if (sourceMetadata) {
+                  await exportCachedTables(conn, db, duckdb, sourceMetadata);
+                }
+              }
             }
           }
         } catch (opfsError) {
           console.warn("OPFS failed, falling back to remote HTTP:", opfsError);
           dataMode = "remote";
-          conn = await db.connect();
+          loadMode = "raw-remote";
           await conn.query(`CREATE OR REPLACE VIEW test_parquet AS SELECT * FROM '${REMOTE_URL}';`);
           await prepareAisSpatialData();
         }
 
-        await prepareAisSpatialData();
+        const countTable = await conn.query("SELECT count(*) AS ship_count FROM ais_latest_positions;");
+        const countRows = tableToObjects(countTable, countTable.schema.fields, 1);
+        latestShipCount = Number(countRows[0]?.ship_count ?? 0);
+        const reportCountTable = await conn.query("SELECT count(*) AS report_count FROM ais_position_points;");
+        const reportCountRows = tableToObjects(reportCountTable, reportCountTable.schema.fields, 1);
+        validPositionReportCount = Number(reportCountRows[0]?.report_count ?? 0);
+
+        await loadDensityPointsIntoWasm();
+        aisSpatialReady = true;
 
         window.duckdbWasm = db;
         if (fileHandle) window.testParquetOPFSHandle = fileHandle;
 
         runButton.disabled = false;
-        if (dataMode === "opfs") {
-          const cacheMsg = cacheStatus === "updated" ? " (downloaded)" : " (cached)";
-          const indexMsg = indexCacheStatus === "loaded" ? " (indexes loaded from cache)" : indexCacheStatus === "built" ? " (indexes built and cached)" : "";
-          setStatus(
-            `Ready. ${OPFS_FILE_NAME} is stored in OPFS${cacheMsg}${indexMsg}; ${validPositionReportCount.toLocaleString()} AIS reports and ${latestShipCount.toLocaleString()} latest ship positions are prepared.`,
-          );
-        } else {
-          setStatus(
-            `Ready. Running from remote ${REMOTE_URL}; ${validPositionReportCount.toLocaleString()} AIS reports and ${latestShipCount.toLocaleString()} latest ship positions are prepared. Data is not cached locally.`,
-          );
-        }
+
+        const modeLabels = {
+          "pre-aggregated-cached": "Pre-aggregated data loaded from cache",
+          "pre-aggregated-downloaded": "Pre-aggregated data downloaded and cached",
+          "raw-browser-build": `${OPFS_FILE_NAME} loaded from OPFS, indexes built in browser`,
+          "raw-remote": `Running from remote ${REMOTE_URL}; data not cached locally`,
+        };
+
+        statusDetail = modeLabels[loadMode] || "Ready";
+        setStatus(
+          `${statusDetail}; ${validPositionReportCount.toLocaleString()} AIS positions and ${latestShipCount.toLocaleString()} latest ship positions are prepared.`,
+        );
+
         setResults("Ready. Run the default query or enter your own SQL against test_parquet or 'test.parquet'. Aggregate zooms use dynamic raster density tiles; close zooms use viewport ship circles.");
         requestViewportRender(0);
       } catch (error) {
