@@ -356,7 +356,7 @@
       const MAX_INDIVIDUAL_SHIPS = 30000;
       const VIEWPORT_PADDING_RATIO = 0.18;
       const VIEWPORT_RENDER_DEBOUNCE_MS = 120;
-      const SHIP_GLYPH_MIN_ZOOM = 8;
+      const SHIP_GLYPH_MIN_ZOOM = 6;
       const DENSITY_TILE_SIZE = 512;
       const DENSITY_TILE_MAX_ZOOM = 20;
       const DENSITY_TILE_BUFFER = 1;
@@ -1090,7 +1090,8 @@
               CASE WHEN trim(VesselType) <> '' THEN trim(VesselType) ELSE NULL END AS ship_type,
               CASE WHEN trim(Status) <> '' THEN trim(Status) ELSE NULL END AS navigation_status,
               TRY_CAST(SOG AS DOUBLE) AS speed_over_ground,
-              TRY_CAST(COG AS DOUBLE) AS raw_course_over_ground
+              TRY_CAST(COG AS DOUBLE) AS raw_course_over_ground,
+              TRY_CAST(Heading AS DOUBLE) AS heading
             FROM test_parquet
             WHERE MMSI IS NOT NULL
               AND LAT BETWEEN -90 AND 90
@@ -1108,7 +1109,8 @@
             CASE
               WHEN arg_max(raw_course_over_ground, position_rank) BETWEEN 0 AND 360 THEN arg_max(raw_course_over_ground, position_rank)
               ELSE NULL
-            END AS course_over_ground
+            END AS course_over_ground,
+            arg_max(heading, position_rank) AS heading
           FROM valid
           GROUP BY mmsi;
         `);
@@ -1146,7 +1148,8 @@
             ship_type,
             navigation_status,
             speed_over_ground,
-            course_over_ground
+            course_over_ground,
+            heading
           FROM ais_latest_positions
           WHERE ${predicate}
           ORDER BY position_time DESC NULLS LAST
@@ -1558,7 +1561,7 @@
         beginDensityTileRender();
         setDeckLayers(createDensityBitmapLayers());
         setMapStatus(
-          `Rendering AIS density as dynamic ${DENSITY_TILE_SIZE}px slippy tiles from ${validPositionReportCount.toLocaleString()} valid position reports. Ship circles begin at zoom ${SHIP_GLYPH_MIN_ZOOM}.`,
+          `Rendering AIS density as dynamic ${DENSITY_TILE_SIZE}px slippy tiles from ${validPositionReportCount.toLocaleString()} valid position reports. Ship heading glyphs begin at zoom ${SHIP_GLYPH_MIN_ZOOM}.`,
         );
       }
 
@@ -1736,25 +1739,50 @@
       }
 
       function createShipGlyphLayer(rows) {
-        return new window.deck.ScatterplotLayer({
+        const triangleCanvas = document.createElement("canvas");
+        triangleCanvas.width = 32;
+        triangleCanvas.height = 32;
+        const ctx = triangleCanvas.getContext("2d");
+        ctx.clearRect(0, 0, 32, 32);
+        ctx.fillStyle = "#ffffff";
+        ctx.beginPath();
+        ctx.moveTo(16, 2);
+        ctx.lineTo(28, 28);
+        ctx.lineTo(16, 22);
+        ctx.lineTo(4, 28);
+        ctx.closePath();
+        ctx.fill();
+
+        return new window.deck.IconLayer({
           id: "viewport-ship-arrows",
           data: rows,
-          filled: true,
-          getFillColor: getShipColor,
-          getLineColor: [255, 255, 255, 235],
+          getIcon: () => ({
+            url: triangleCanvas.toDataURL(),
+            width: 32,
+            height: 32,
+            mask: true,
+            anchorX: 16,
+            anchorY: 16,
+            maskAutoColor: true,
+          }),
           getPosition: (row) => [Number(row.longitude), Number(row.latitude)],
-          getRadius: (row) => {
+          getSize: (row) => {
             const speed = Number(row.speed_over_ground);
-            return Number.isFinite(speed) && speed > 1 ? 5 : 4;
+            return Number.isFinite(speed) && speed > 1 ? 14 : 11;
           },
-          lineWidthMinPixels: 1.5,
-          lineWidthUnits: "pixels",
+          getAngle: (row) => {
+            const heading = Number(row.heading);
+            if (Number.isFinite(heading) && heading >= 0 && heading < 360) return heading;
+            const cog = Number(row.course_over_ground);
+            if (Number.isFinite(cog) && cog >= 0 && cog < 360) return cog;
+            return 0;
+          },
+          sizeScale: 1,
+          sizeUnits: "pixels",
+          sizeMinPixels: 8,
+          sizeMaxPixels: 20,
           opacity: 0.9,
           pickable: true,
-          radiusMaxPixels: 9,
-          radiusMinPixels: 4,
-          radiusUnits: "pixels",
-          stroked: true,
         });
       }
 
@@ -1918,7 +1946,7 @@
         setDeckLayers(layers, getShipLayerProps());
 
         setMapStatus(
-          `Rendered ${rows.length.toLocaleString()} visible ships as GPU-instanced circles from ${latestShipCount.toLocaleString()} latest positions. Query/render: ${elapsedMs.toFixed(1)} ms.`,
+          `Rendered ${rows.length.toLocaleString()} visible ships as heading glyphs from ${latestShipCount.toLocaleString()} latest positions. Query/render: ${elapsedMs.toFixed(1)} ms.`,
         );
       }
 
@@ -2227,7 +2255,7 @@
           `${statusDetail}; ${validPositionReportCount.toLocaleString()} AIS positions and ${latestShipCount.toLocaleString()} latest ship positions are prepared.`,
         );
 
-        setResults("Ready. Run the default query or enter your own SQL against test_parquet or 'test.parquet'. Aggregate zooms use dynamic raster density tiles; close zooms use viewport ship circles.");
+        setResults("Ready. Run the default query or enter your own SQL against test_parquet or 'test.parquet'. Aggregate zooms use dynamic raster density tiles; close zooms use viewport ship heading glyphs.");
         requestViewportRender(0);
       } catch (error) {
         console.error(error);
