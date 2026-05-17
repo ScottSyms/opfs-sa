@@ -1028,8 +1028,8 @@
               CAST(MMSI AS VARCHAR) AS mmsi,
               CAST(LAT AS DOUBLE) AS latitude,
               CAST(LON AS DOUBLE) AS longitude,
-              CAST(BaseDateTime AS BIGINT) AS position_time,
-              COALESCE(CAST(BaseDateTime AS BIGINT), 0) AS position_rank,
+              CAST(extract(epoch from BaseDateTime) AS BIGINT) AS position_time,
+              COALESCE(CAST(extract(epoch from BaseDateTime) AS BIGINT), 0) AS position_rank,
               CASE WHEN trim(VesselName) <> '' THEN trim(VesselName) ELSE NULL END AS name,
               CASE WHEN trim(VesselType) <> '' THEN trim(VesselType) ELSE NULL END AS ship_type,
               CASE WHEN trim(Status) <> '' THEN trim(Status) ELSE NULL END AS navigation_status,
@@ -1747,7 +1747,7 @@
 
         try {
           const table = await conn.query(`
-            SELECT CAST(LAT AS DOUBLE) AS latitude, CAST(LON AS DOUBLE) AS longitude, CAST(BaseDateTime AS BIGINT) AS position_time
+            SELECT CAST(LAT AS DOUBLE) AS latitude, CAST(LON AS DOUBLE) AS longitude, CAST(extract(epoch from BaseDateTime) AS BIGINT) AS position_time
             FROM test_parquet
             WHERE CAST(MMSI AS VARCHAR) = '${mmsi}'
               AND BaseDateTime IS NOT NULL
@@ -1757,8 +1757,8 @@
               AND LON != 0
               AND CAST(LAT AS DOUBLE) BETWEEN -90 AND 90
               AND CAST(LON AS DOUBLE) BETWEEN -180 AND 180
-              AND CAST(BaseDateTime AS BIGINT) >= ${startTime}
-              AND CAST(BaseDateTime AS BIGINT) <= ${positionTime}
+              AND CAST(extract(epoch from BaseDateTime) AS BIGINT) >= ${startTime}
+              AND CAST(extract(epoch from BaseDateTime) AS BIGINT) <= ${positionTime}
             ORDER BY position_time;
           `);
 
