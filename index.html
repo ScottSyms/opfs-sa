@@ -320,7 +320,7 @@
           </div>
         </div>
         <label for="query">Query local OPFS parquet file <code>test.parquet</code></label>
-        <textarea id="query" spellcheck="false">SELECT MMSI, LAT, LON, VesselName, SOG, COG FROM test_parquet LIMIT 100;</textarea>
+        <textarea id="query" spellcheck="false">SELECT MMSI, LAT, LON, VesselName, SOG, COG FROM test.parquet LIMIT 100;</textarea>
         <div class="actions">
           <button id="run" type="button" disabled>Run Query</button>
           <div id="timing">No query run yet.</div>
@@ -1028,9 +1028,11 @@
               CAST(MMSI AS VARCHAR) AS mmsi,
               CAST(LAT AS DOUBLE) AS latitude,
               CAST(LON AS DOUBLE) AS longitude,
-              extract(epoch from BaseDateTime) AS position_time,
-              COALESCE(extract(epoch from BaseDateTime), 0) AS position_rank,
+              CAST(BaseDateTime AS BIGINT) AS position_time,
+              COALESCE(CAST(BaseDateTime AS BIGINT), 0) AS position_rank,
               CASE WHEN trim(VesselName) <> '' THEN trim(VesselName) ELSE NULL END AS name,
+              CASE WHEN trim(VesselType) <> '' THEN trim(VesselType) ELSE NULL END AS ship_type,
+              CASE WHEN trim(Status) <> '' THEN trim(Status) ELSE NULL END AS navigation_status,
               TRY_CAST(SOG AS DOUBLE) AS speed_over_ground,
               TRY_CAST(COG AS DOUBLE) AS raw_course_over_ground
             FROM test_parquet
@@ -1044,6 +1046,8 @@
             arg_max(longitude, position_rank) AS longitude,
             max(position_time) AS position_time,
             arg_max(name, position_rank) AS name,
+            arg_max(ship_type, position_rank) AS ship_type,
+            arg_max(navigation_status, position_rank) AS navigation_status,
             arg_max(speed_over_ground, position_rank) AS speed_over_ground,
             CASE
               WHEN arg_max(raw_course_over_ground, position_rank) BETWEEN 0 AND 360 THEN arg_max(raw_course_over_ground, position_rank)
@@ -1083,6 +1087,8 @@
             longitude,
             position_time,
             name,
+            ship_type,
+            navigation_status,
             speed_over_ground,
             course_over_ground
           FROM ais_latest_positions
@@ -1717,6 +1723,8 @@
               text: [
                 row.name || `MMSI ${row.mmsi}`,
                 `MMSI: ${row.mmsi}`,
+                `Ship type: ${row.ship_type || "unknown"}`,
+                `Status: ${row.navigation_status || "unknown"}`,
               ].join("\n"),
             };
           },
@@ -1739,7 +1747,7 @@
 
         try {
           const table = await conn.query(`
-            SELECT CAST(LAT AS DOUBLE) AS latitude, CAST(LON AS DOUBLE) AS longitude, extract(epoch from BaseDateTime) AS position_time
+            SELECT CAST(LAT AS DOUBLE) AS latitude, CAST(LON AS DOUBLE) AS longitude, CAST(BaseDateTime AS BIGINT) AS position_time
             FROM test_parquet
             WHERE CAST(MMSI AS VARCHAR) = '${mmsi}'
               AND BaseDateTime IS NOT NULL
@@ -1749,8 +1757,8 @@
               AND LON != 0
               AND CAST(LAT AS DOUBLE) BETWEEN -90 AND 90
               AND CAST(LON AS DOUBLE) BETWEEN -180 AND 180
-              AND extract(epoch from BaseDateTime) >= ${startTime}
-              AND extract(epoch from BaseDateTime) <= ${positionTime}
+              AND CAST(BaseDateTime AS BIGINT) >= ${startTime}
+              AND CAST(BaseDateTime AS BIGINT) <= ${positionTime}
             ORDER BY position_time;
           `);
 
