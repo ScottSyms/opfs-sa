@@ -6,6 +6,7 @@
 
   # https://devenv.sh/packages/
   packages = [ pkgs.git
+               pkgs.git-lfs
                pkgs.duckdb
                pkgs.rclone
                pkgs.nodejs
@@ -26,26 +27,18 @@
     echo "This is the COP tool"
   '';
 
+
   # https://devenv.sh/basics/
   enterShell = ''
     hello         # Run scripts directly
     git --version # Use packages
   '';
 
-  # https://devenv.sh/tasks/
-  # tasks = {
-  #   "myproj:setup".exec = "mytool build";
-  #   "devenv:enterShell".after = [ "myproj:setup" ];
-  # };
-
   # https://devenv.sh/tests/
   enterTest = ''
     echo "Running tests"
+    git lfs install
     git --version | grep --color=auto "${pkgs.git.version}"
   '';
 
-  # https://devenv.sh/git-hooks/
-  # git-hooks.hooks.shellcheck.enable = true;
-
-  # See full reference at https://devenv.sh/reference/options/
 }
