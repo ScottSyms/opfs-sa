@@ -509,7 +509,7 @@
         });
 
         if (typeof deck.MapboxOverlay === "function") {
-          mapDeckOverlay = new deck.MapboxOverlay({ interleaved: true, layers: [] });
+          mapDeckOverlay = new deck.MapboxOverlay({ interleaved: true, layers: [], getCursor: () => "default" });
           mapLibreMap.addControl(mapDeckOverlay);
         } else {
           deckInstance = new deck.Deck({
@@ -518,6 +518,7 @@
             layers: [],
             views: [new deck.MapView({ repeat: true })],
             viewState: getMapViewState(),
+            getCursor: () => "default",
           });
         }
 
