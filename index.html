@@ -346,6 +346,22 @@
       const PRE_AGGREGATED_FILES = ["ais_position_points.parquet", "ais_latest_positions.parquet"];
       const PRE_AGGREGATED_SOURCE = "/ais_position_points.parquet";
       const PRE_AGGREGATED_SHIP_SOURCE = "/ais_latest_positions.parquet";
+      const SHIP_ICON_DATA_URL = (() => {
+        const c = document.createElement("canvas");
+        c.width = 32;
+        c.height = 32;
+        const ctx = c.getContext("2d");
+        ctx.fillStyle = "#ffffff";
+        ctx.beginPath();
+        ctx.moveTo(16, 2);
+        ctx.lineTo(28, 28);
+        ctx.lineTo(16, 22);
+        ctx.lineTo(4, 28);
+        ctx.closePath();
+        ctx.fill();
+        return c.toDataURL();
+      })();
+
       const DENSITY_WASM_URL = "./density_engine.wasm";
       const DENSITY_WORKER_URL = "./density_worker.js";
       const KEPLER_MAP_ID = "query-map";
@@ -1740,24 +1756,23 @@
         return Math.min(250_000, Math.max(5_000, extentMeters / 80));
       }
 
-      function getShipColor(row) {
-        const speed = Number(row.speed_over_ground);
-        if (Number.isFinite(speed) && speed <= 1) return [255, 60, 60, 220];
-        if (Number.isFinite(speed) && speed >= 50) return [255, 200, 0, 230];
-        return [0, 220, 100, 220];
-      }
-
       function createShipGlyphLayer(rows) {
-        return new window.deck.ScatterplotLayer({
+        return new window.deck.IconLayer({
           id: "viewport-ship-arrows",
           data: rows,
-          filled: true,
-          getFillColor: getShipColor,
-          getLineColor: [255, 255, 255, 235],
+          getIcon: () => ({
+            url: SHIP_ICON_DATA_URL,
+            width: 32,
+            height: 32,
+            mask: true,
+            anchorX: 16,
+            anchorY: 16,
+            maskAutoColor: true,
+          }),
           getPosition: (row) => [Number(row.longitude), Number(row.latitude)],
-          getRadius: (row) => {
+          getSize: (row) => {
             const speed = Number(row.speed_over_ground);
-            return Number.isFinite(speed) && speed > 1 ? 5 : 4;
+            return Number.isFinite(speed) && speed > 1 ? 14 : 11;
           },
           getAngle: (row) => {
             let angle = 0;
@@ -1772,18 +1787,14 @@
             }
             return Math.round(angle / 30) * 30;
           },
-          lineWidthMinPixels: 1.5,
-          lineWidthUnits: "pixels",
+          sizeScale: 1,
+          sizeUnits: "pixels",
+          sizeMinPixels: 8,
+          sizeMaxPixels: 20,
           opacity: 0.9,
           pickable: true,
-          radiusMaxPixels: 9,
-          radiusMinPixels: 4,
-          radiusUnits: "pixels",
-          stroked: true,
           updateTriggers: {
-            getFillColor: 0,
-            getLineColor: 0,
-            getRadius: 0,
+            getSize: 0,
             getAngle: 0,
           },
         });
