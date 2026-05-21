@@ -347,7 +347,7 @@
       const PRE_AGGREGATED_SOURCE = "/ais_position_points.parquet";
       const PRE_AGGREGATED_SHIP_SOURCE = "/ais_latest_positions.parquet";
       const SHIP_ICONS = (() => {
-        const colors = { slow: [255, 80, 80], fast: [255, 210, 50], medium: [50, 230, 130] };
+        const colors = { slow: [255, 80, 80], fast: [255, 210, 50], medium: [0, 200, 255] };
         const icons = {};
         for (const [key, color] of Object.entries(colors)) {
           const c = document.createElement("canvas");
