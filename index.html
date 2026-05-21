@@ -1756,6 +1756,13 @@
         return Math.min(250_000, Math.max(5_000, extentMeters / 80));
       }
 
+      function getShipColor(row) {
+        const speed = Number(row.speed_over_ground);
+        if (Number.isFinite(speed) && speed <= 1) return [255, 80, 80, 240];
+        if (Number.isFinite(speed) && speed >= 50) return [255, 210, 50, 240];
+        return [50, 230, 130, 240];
+      }
+
       function createShipGlyphLayer(rows) {
         return new window.deck.IconLayer({
           id: "viewport-ship-arrows",
@@ -1770,6 +1777,7 @@
             maskAutoColor: true,
           }),
           getPosition: (row) => [Number(row.longitude), Number(row.latitude)],
+          getFillColor: getShipColor,
           getSize: (row) => {
             const speed = Number(row.speed_over_ground);
             return Number.isFinite(speed) && speed > 1 ? 14 : 11;
@@ -1794,6 +1802,7 @@
           opacity: 0.9,
           pickable: true,
           updateTriggers: {
+            getFillColor: 0,
             getSize: 0,
             getAngle: 0,
           },
