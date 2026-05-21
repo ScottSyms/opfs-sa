@@ -355,7 +355,7 @@
       const MAX_KEPLER_ROWS = 5000;
       const MAX_INDIVIDUAL_SHIPS = 30000;
       const VIEWPORT_PADDING_RATIO = 0.18;
-      const VIEWPORT_RENDER_DEBOUNCE_MS = 120;
+      const VIEWPORT_RENDER_DEBOUNCE_MS = 200;
       const SHIP_GLYPH_MIN_ZOOM = 6;
       const DENSITY_TILE_SIZE = 512;
       const DENSITY_TILE_MAX_ZOOM = 20;
@@ -1748,36 +1748,16 @@
       }
 
       function createShipGlyphLayer(rows) {
-        const triangleCanvas = document.createElement("canvas");
-        triangleCanvas.width = 32;
-        triangleCanvas.height = 32;
-        const ctx = triangleCanvas.getContext("2d");
-        ctx.clearRect(0, 0, 32, 32);
-        ctx.fillStyle = "#ffffff";
-        ctx.beginPath();
-        ctx.moveTo(16, 2);
-        ctx.lineTo(28, 28);
-        ctx.lineTo(16, 22);
-        ctx.lineTo(4, 28);
-        ctx.closePath();
-        ctx.fill();
-
-        return new window.deck.IconLayer({
+        return new window.deck.ScatterplotLayer({
           id: "viewport-ship-arrows",
           data: rows,
-          getIcon: () => ({
-            url: triangleCanvas.toDataURL(),
-            width: 32,
-            height: 32,
-            mask: true,
-            anchorX: 16,
-            anchorY: 16,
-            maskAutoColor: true,
-          }),
+          filled: true,
+          getFillColor: getShipColor,
+          getLineColor: [255, 255, 255, 235],
           getPosition: (row) => [Number(row.longitude), Number(row.latitude)],
-          getSize: (row) => {
+          getRadius: (row) => {
             const speed = Number(row.speed_over_ground);
-            return Number.isFinite(speed) && speed > 1 ? 14 : 11;
+            return Number.isFinite(speed) && speed > 1 ? 5 : 4;
           },
           getAngle: (row) => {
             const heading = Number(row.heading);
@@ -1786,12 +1766,20 @@
             if (Number.isFinite(cog) && cog >= 0 && cog < 360) return cog;
             return 0;
           },
-          sizeScale: 1,
-          sizeUnits: "pixels",
-          sizeMinPixels: 8,
-          sizeMaxPixels: 20,
+          lineWidthMinPixels: 1.5,
+          lineWidthUnits: "pixels",
           opacity: 0.9,
           pickable: true,
+          radiusMaxPixels: 9,
+          radiusMinPixels: 4,
+          radiusUnits: "pixels",
+          stroked: true,
+          updateTriggers: {
+            getFillColor: 0,
+            getLineColor: 0,
+            getRadius: 0,
+            getAngle: 0,
+          },
         });
       }
 
