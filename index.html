@@ -1742,9 +1742,9 @@
 
       function getShipColor(row) {
         const speed = Number(row.speed_over_ground);
-        if (Number.isFinite(speed) && speed <= 1) return [91, 141, 239, 210];
-        if (Number.isFinite(speed) && speed >= 50) return [255, 184, 77, 230];
-        return [87, 221, 181, 220];
+        if (Number.isFinite(speed) && speed <= 1) return [255, 60, 60, 220];
+        if (Number.isFinite(speed) && speed >= 50) return [255, 200, 0, 230];
+        return [0, 220, 100, 220];
       }
 
       function createShipGlyphLayer(rows) {
@@ -1760,11 +1760,17 @@
             return Number.isFinite(speed) && speed > 1 ? 5 : 4;
           },
           getAngle: (row) => {
+            let angle = 0;
             const heading = Number(row.heading);
-            if (Number.isFinite(heading) && heading >= 0 && heading < 360) return heading;
-            const cog = Number(row.course_over_ground);
-            if (Number.isFinite(cog) && cog >= 0 && cog < 360) return cog;
-            return 0;
+            if (Number.isFinite(heading) && heading >= 0 && heading < 360) {
+              angle = heading;
+            } else {
+              const cog = Number(row.course_over_ground);
+              if (Number.isFinite(cog) && cog >= 0 && cog < 360) {
+                angle = cog;
+              }
+            }
+            return Math.round(angle / 30) * 30;
           },
           lineWidthMinPixels: 1.5,
           lineWidthUnits: "pixels",
