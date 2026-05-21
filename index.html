@@ -347,7 +347,7 @@
       const PRE_AGGREGATED_SOURCE = "/ais_position_points.parquet";
       const PRE_AGGREGATED_SHIP_SOURCE = "/ais_latest_positions.parquet";
       const SHIP_ICONS = (() => {
-        const colors = { slow: [255, 80, 80], fast: [255, 210, 50], medium: [0, 200, 255] };
+        const colors = { slow: [255, 80, 80], fast: [255, 210, 50], medium: [255, 140, 0] };
         const icons = {};
         for (const [key, color] of Object.entries(colors)) {
           const c = document.createElement("canvas");
@@ -369,9 +369,10 @@
 
       function getShipIcon(row) {
         const speed = Number(row.speed_over_ground);
-        if (Number.isFinite(speed) && speed <= 1) return SHIP_ICONS.slow;
-        if (Number.isFinite(speed) && speed >= 50) return SHIP_ICONS.fast;
-        return SHIP_ICONS.medium;
+        if (!Number.isFinite(speed)) return SHIP_ICONS.slow;
+        if (speed < 10) return SHIP_ICONS.slow;
+        if (speed <= 20) return SHIP_ICONS.medium;
+        return SHIP_ICONS.fast;
       }
 
       const DENSITY_WASM_URL = "./density_engine.wasm";
