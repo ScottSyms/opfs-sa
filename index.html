@@ -1770,6 +1770,19 @@
         return Math.min(250_000, Math.max(5_000, extentMeters / 80));
       }
 
+      function createShipHitLayer(rows) {
+        return new window.deck.ScatterplotLayer({
+          id: "viewport-ship-hit",
+          data: rows,
+          getPosition: (row) => [Number(row.longitude), Number(row.latitude)],
+          getRadius: 18,
+          getFillColor: [0, 0, 0, 0],
+          pickable: true,
+          radiusUnits: "pixels",
+          updateTriggers: { getRadius: 0 },
+        });
+      }
+
       function createShipGlyphLayer(rows) {
         return new window.deck.IconLayer({
           id: "viewport-ship-arrows",
@@ -1805,7 +1818,7 @@
           sizeMinPixels: 8,
           sizeMaxPixels: 20,
           opacity: 0.9,
-          pickable: true,
+          pickable: false,
           updateTriggers: {
             getIcon: 0,
             getSize: 0,
@@ -1955,6 +1968,7 @@
         const layers = [...createDensityBitmapLayers()];
         if (selectedShipTrackLayer) layers.push(selectedShipTrackLayer);
         if (activeViewportMode === "ships") {
+          layers.push(createShipHitLayer(currentViewportShipRows));
           layers.push(createShipGlyphLayer(currentViewportShipRows));
         }
         setDeckLayers(layers, getShipLayerProps());
@@ -1969,6 +1983,7 @@
 
         const layers = [...createDensityBitmapLayers()];
         if (selectedShipTrackLayer) layers.push(selectedShipTrackLayer);
+        layers.push(createShipHitLayer(rows));
         layers.push(createShipGlyphLayer(rows));
 
         setDeckLayers(layers, getShipLayerProps());
