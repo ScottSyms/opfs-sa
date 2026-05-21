@@ -346,21 +346,33 @@
       const PRE_AGGREGATED_FILES = ["ais_position_points.parquet", "ais_latest_positions.parquet"];
       const PRE_AGGREGATED_SOURCE = "/ais_position_points.parquet";
       const PRE_AGGREGATED_SHIP_SOURCE = "/ais_latest_positions.parquet";
-      const SHIP_ICON_DATA_URL = (() => {
-        const c = document.createElement("canvas");
-        c.width = 32;
-        c.height = 32;
-        const ctx = c.getContext("2d");
-        ctx.fillStyle = "#ffffff";
-        ctx.beginPath();
-        ctx.moveTo(16, 2);
-        ctx.lineTo(28, 28);
-        ctx.lineTo(16, 22);
-        ctx.lineTo(4, 28);
-        ctx.closePath();
-        ctx.fill();
-        return c.toDataURL();
+      const SHIP_ICONS = (() => {
+        const colors = { slow: [255, 80, 80], fast: [255, 210, 50], medium: [50, 230, 130] };
+        const icons = {};
+        for (const [key, color] of Object.entries(colors)) {
+          const c = document.createElement("canvas");
+          c.width = 32;
+          c.height = 32;
+          const ctx = c.getContext("2d");
+          ctx.fillStyle = `rgb(${color.join(",")})`;
+          ctx.beginPath();
+          ctx.moveTo(16, 2);
+          ctx.lineTo(28, 28);
+          ctx.lineTo(16, 22);
+          ctx.lineTo(4, 28);
+          ctx.closePath();
+          ctx.fill();
+          icons[key] = c.toDataURL();
+        }
+        return icons;
       })();
+
+      function getShipIcon(row) {
+        const speed = Number(row.speed_over_ground);
+        if (Number.isFinite(speed) && speed <= 1) return SHIP_ICONS.slow;
+        if (Number.isFinite(speed) && speed >= 50) return SHIP_ICONS.fast;
+        return SHIP_ICONS.medium;
+      }
 
       const DENSITY_WASM_URL = "./density_engine.wasm";
       const DENSITY_WORKER_URL = "./density_worker.js";
@@ -1756,28 +1768,19 @@
         return Math.min(250_000, Math.max(5_000, extentMeters / 80));
       }
 
-      function getShipColor(row) {
-        const speed = Number(row.speed_over_ground);
-        if (Number.isFinite(speed) && speed <= 1) return [255, 80, 80, 240];
-        if (Number.isFinite(speed) && speed >= 50) return [255, 210, 50, 240];
-        return [50, 230, 130, 240];
-      }
-
       function createShipGlyphLayer(rows) {
         return new window.deck.IconLayer({
           id: "viewport-ship-arrows",
           data: rows,
-          getIcon: () => ({
-            url: SHIP_ICON_DATA_URL,
+          getIcon: (row) => ({
+            url: getShipIcon(row),
             width: 32,
             height: 32,
-            mask: true,
+            mask: false,
             anchorX: 16,
             anchorY: 16,
-            maskAutoColor: true,
           }),
           getPosition: (row) => [Number(row.longitude), Number(row.latitude)],
-          getFillColor: getShipColor,
           getSize: (row) => {
             const speed = Number(row.speed_over_ground);
             return Number.isFinite(speed) && speed > 1 ? 14 : 11;
@@ -1802,7 +1805,7 @@
           opacity: 0.9,
           pickable: true,
           updateTriggers: {
-            getFillColor: 0,
+            getIcon: 0,
             getSize: 0,
             getAngle: 0,
           },
