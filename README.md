@@ -55,6 +55,8 @@ In-Browser DuckDB fetches pre-aggregated Parquet files once and stores them in t
 
 For large datasets (e.g., 24GB with 50M+ rows), the browser cannot efficiently download and aggregate the raw data. Instead, pre-aggregate the data server-side using the provided `aggregate.py` script.
 
+The script selects a temporal contiguous extract rather than randomly sampling individual rows. It picks a random anchor day, expands backward and forward by whole days while staying below the row budget, then fills the remaining budget hour-by-hour from the selected window edges. This preserves realistic track continuity in `test.parquet`.
+
 ### Prerequisites
 
 - Python 3.10+
@@ -68,15 +70,19 @@ python aggregate.py
 
 # Custom source and output directory
 python aggregate.py /path/to/large_dataset.parquet /path/to/output/
+
+# Reproducible temporal window and custom row budget
+python aggregate.py /path/to/large_dataset.parquet /path/to/output/ --target-rows 20000000 --seed 1234
 ```
 
-The script produces three files:
+The script produces four files:
 
 | File | Description | Estimated size (20M sample) |
 |------|-------------|--------------------------|
-| `test.parquet` | 20M sampled rows, all 18 columns | ~900 MB |
+| `test.parquet` | Temporal contiguous extract just under 20M rows, all 18 columns | ~900 MB |
 | `ais_position_points.parquet` | All valid lat/lon positions within Mercator bounds | ~300 MB |
 | `ais_latest_positions.parquet` | One row per MMSI with latest position and vessel metadata | ~5-15 MB |
+| `sample_manifest.json` | Selected window metadata: anchor day, start/end time, row counts, seed | ~KB |
 
 ### Schema Requirements
 
@@ -106,7 +112,8 @@ your-server/
 ├── density_worker.js
 ├── test.parquet                   ← sampled raw data
 ├── ais_position_points.parquet    ← pre-aggregated
-└── ais_latest_positions.parquet   ← pre-aggregated
+├── ais_latest_positions.parquet   ← pre-aggregated
+└── sample_manifest.json           ← selected window metadata
 ```
 
 The browser will automatically detect and download the pre-aggregated files on first visit, then cache them in OPFS for instant loading on subsequent visits.
@@ -135,7 +142,7 @@ If pre-aggregated files are not available on the server, the app falls back to d
 
 ### Data Flow
 
-1. **Server-side**: `aggregate.py` reads the raw Parquet file, samples 20M rows into `test.parquet`, then produces `ais_position_points.parquet` and `ais_latest_positions.parquet`
+1. **Server-side**: `aggregate.py` reads the raw Parquet file, selects a contiguous temporal extract just under 20M rows into `test.parquet`, then produces `ais_position_points.parquet` and `ais_latest_positions.parquet`
 2. **Browser first visit**: Downloads pre-aggregated files and stores them in OPFS
 3. **Browser subsequent visits**: Loads pre-aggregated files directly from OPFS (instant)
 4. **Single Arrow-to-WASM transfer** — `SELECT latitude, longitude FROM ais_position_points` produces one Arrow table. The two columns are copied into `Float64Array`s, transferred (zero-copy via `Transferable`) to the Web Worker, and loaded into WASM memory via `load_points`. This happens exactly once.
