@@ -13,7 +13,7 @@ In-Browser DuckDB fetches pre-aggregated Parquet files once and stores them in t
 ## Screenshots
 
 ![Full application interface showing ship heading glyphs, SQL query panel, and results table](images/ships.png)
-*Overview: 20M AIS positions rendered as heading-direction glyphs with ad-hoc SQL queries.*
+*Overview: AIS positions rendered as heading-direction glyphs with ad-hoc SQL queries.*
 
 ### Density Tiles + Ship Positions
 
@@ -71,16 +71,16 @@ python aggregate.py
 # Custom source and output directory
 python aggregate.py /path/to/large_dataset.parquet /path/to/output/
 
-# Reproducible temporal window and custom row budget
-python aggregate.py /path/to/large_dataset.parquet /path/to/output/ --target-rows 20000000 --seed 1234
+# Reproducible temporal window and custom position-report budget
+python aggregate.py /path/to/large_dataset.parquet /path/to/output/ --ships 40000000 --seed 1234
 ```
 
 The script produces four files:
 
-| File | Description | Estimated size (20M sample) |
+| File | Description | Estimated size (40M sample) |
 |------|-------------|--------------------------|
-| `test.parquet` | Temporal contiguous extract just under 20M rows, all 18 columns | ~900 MB |
-| `ais_position_points.parquet` | All valid lat/lon positions within Mercator bounds | ~300 MB |
+| `test.parquet` | Temporal contiguous extract just under 40M rows, all 18 columns | ~1.8 GB |
+| `ais_position_points.parquet` | All valid lat/lon positions within Mercator bounds | ~600 MB |
 | `ais_latest_positions.parquet` | One row per MMSI with latest position and vessel metadata | ~5-15 MB |
 | `sample_manifest.json` | Selected window metadata: anchor day, start/end time, row counts, seed | ~KB |
 
@@ -142,7 +142,7 @@ If pre-aggregated files are not available on the server, the app falls back to d
 
 ### Data Flow
 
-1. **Server-side**: `aggregate.py` reads the raw Parquet file, selects a contiguous temporal extract just under 20M rows into `test.parquet`, then produces `ais_position_points.parquet` and `ais_latest_positions.parquet`
+1. **Server-side**: `aggregate.py` reads the raw Parquet file, selects a contiguous temporal extract just under 40M rows into `test.parquet`, then produces `ais_position_points.parquet` and `ais_latest_positions.parquet`
 2. **Browser first visit**: Downloads pre-aggregated files and stores them in OPFS
 3. **Browser subsequent visits**: Loads pre-aggregated files directly from OPFS (instant)
 4. **Single Arrow-to-WASM transfer** — `SELECT latitude, longitude FROM ais_position_points` produces one Arrow table. The two columns are copied into `Float64Array`s, transferred (zero-copy via `Transferable`) to the Web Worker, and loaded into WASM memory via `load_points`. This happens exactly once.

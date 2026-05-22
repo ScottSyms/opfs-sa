@@ -3,17 +3,17 @@
 Pre-aggregate AIS data for browser consumption.
 
 This script reads a large AIS Parquet file, selects a temporal contiguous sample
-just under 20M rows into test.parquet, then builds pre-aggregated files that the
+just under 40M position reports into test.parquet, then builds pre-aggregated files that the
 browser can load quickly:
 
-  - test.parquet                    (~1GB):  temporal sample, all 18 columns
-  - ais_position_points.parquet     (~300MB): All valid lat/lon positions
+  - test.parquet                    (~2GB):  temporal sample, all 18 columns
+  - ais_position_points.parquet     (~600MB): All valid lat/lon positions
   - ais_latest_positions.parquet    (~5-15MB): One row per MMSI with latest position
   - sample_manifest.json            metadata for the selected temporal window
 
 Usage:
     python aggregate.py [source.parquet] [output_dir]
-    python aggregate.py [source.parquet] [output_dir] --target-rows 20000000 --seed 1234
+    python aggregate.py [source.parquet] [output_dir] --ships 40000000 --seed 1234
 
 Defaults:
     source.parquet = ~/code/data/mc/mcdec/parquet/ais_2024.parquet
@@ -29,7 +29,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-DEFAULT_TARGET_ROWS = 20_000_000
+DEFAULT_TARGET_ROWS = 40_000_000
 MERCATOR_MAX_LATITUDE = 85.05112878
 DEFAULT_SOURCE_PATH = Path.home() / "code/data/mc/mcdec/parquet/ais_2024.parquet"
 
@@ -39,10 +39,12 @@ def parse_args():
     parser.add_argument("source", nargs="?", type=Path, default=DEFAULT_SOURCE_PATH, help="Source AIS Parquet file")
     parser.add_argument("output_dir", nargs="?", type=Path, default=Path("."), help="Output directory")
     parser.add_argument(
+        "--ships",
         "--target-rows",
+        dest="target_rows",
         type=int,
         default=DEFAULT_TARGET_ROWS,
-        help="Upper row budget. The selected temporal window will stay below this value.",
+        help="Upper position-report row budget. The selected temporal window will stay below this value.",
     )
     parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducible anchor-day selection")
     return parser.parse_args()
@@ -179,7 +181,7 @@ def expand_by_hours(start_hour, end_hour, hourly_counts, selected_count, max_row
 def choose_temporal_window(hourly_counts, daily_counts, target_rows, seed):
     max_rows = target_rows - 1
     if max_rows < 1:
-        raise ValueError("--target-rows must be greater than 1")
+        raise ValueError("--ships must be greater than 1")
 
     rng = random.Random(seed)
     anchor_day = select_anchor_day(daily_counts, rng)
