@@ -7,7 +7,7 @@ A high-performance geospatial visualization tool that runs entirely in the brows
 In-Browser DuckDB fetches pre-aggregated Parquet files once and stores them in the browser's **OPFS** — a performant, persistent, sandboxed file system. All subsequent queries run against this local copy, eliminating network latency and server costs. The visualization uses a hybrid rendering approach:
 
 - **Aggregate density tiles** (zoom levels 0–20): Renders point density as Datashader-style raster tiles computed in Rust/WASM. Fractional zoom levels round up to the next whole zoom, with higher-zoom tiles layered on top for better resolution.
-- **Ship heading glyphs** (zoom 6+): Shows individual ship positions as GPU-instanced markers rotated by vessel heading, color-coded by speed (red = slow, green = medium, yellow = fast).
+- **Ship heading glyphs** (zoom 6+): Shows individual ship positions as GPU-instanced markers rotated by vessel heading, color-coded by speed (red = slow, orange = medium, yellow = fast).
 - **Ship track visualization** (zoom 6+): Click any ship marker to see its 4-hour track with time-based color fading. Click again to hide.
 
 ## Screenshots
@@ -46,7 +46,7 @@ In-Browser DuckDB fetches pre-aggregated Parquet files once and stores them in t
 - **Tile request debouncing** and coalescing to prevent wasted computation during rapid navigation
 - **Parent tile fallback** — cached lower-zoom tiles shown while higher-zoom tiles load
 - **Aggregate opacity slider** and zoom level display
-- **Color-coded ship markers** — red (≤1 knot), green (1–50 knots), yellow (≥50 knots)
+- **Color-coded ship markers** — red (<10 knots), orange (10–20 knots), yellow (>20 knots)
 - **Ad-hoc SQL queries** via DuckDB-WASM against the local Parquet file (does not affect the map)
 - **Kepler.gl** integration for query result visualization
 - **Remote HTTP fallback** — if OPFS is unavailable, queries the remote file directly over HTTP with range request support
@@ -104,7 +104,7 @@ your-server/
 ├── index.html
 ├── density_engine.wasm
 ├── density_worker.js
-── test.parquet                   ← sampled raw data
+├── test.parquet                   ← sampled raw data
 ├── ais_position_points.parquet    ← pre-aggregated
 └── ais_latest_positions.parquet   ← pre-aggregated
 ```
@@ -188,11 +188,38 @@ This gives you:
 - **Python + duckdb** — for running `aggregate.py`
 - **Node.js + pnpm** — for serving the project
 - **rclone** — for data transfer between storage backends
-- **Git** — version control
+- **Git + Git LFS** — version control and large Parquet file checkout
 
 No need to install anything globally. The shell is isolated and reproducible — same environment on any machine with Nix.
 
 **First time with Nix/devenv?** See the official installation guide at <https://devenv.sh/getting-started/> for step-by-step instructions on installing Nix, enabling flakes, and installing devenv.
+
+### Fresh Clone With Git LFS
+
+The Parquet files are tracked with Git LFS. A normal clone without LFS hydration leaves small text pointer files in place of real Parquet data, which causes DuckDB errors such as `No magic bytes found at end of file 'test.parquet'`.
+
+After cloning, run:
+
+```bash
+git lfs install
+git lfs pull
+```
+
+Verify that the files are real Parquet payloads, not 100-byte LFS pointers:
+
+```bash
+ls -lh test.parquet ais_position_points.parquet ais_latest_positions.parquet
+```
+
+Expected sizes are approximately:
+
+```text
+test.parquet                    912M
+ais_position_points.parquet     300M
+ais_latest_positions.parquet    2.8M
+```
+
+If `git lfs` is not available, install it first (`brew install git-lfs`) or enter the devenv shell.
 
 ### Manual Setup
 

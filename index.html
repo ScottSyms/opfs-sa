@@ -653,6 +653,40 @@
         return db;
       }
 
+      async function validateDownloadedParquet(file, fileName, url) {
+        if (file.size <= 1024) {
+          const text = await file.text();
+          if (text.startsWith("version https://git-lfs.github.com/spec/v1")) {
+            throw new Error(
+              `${fileName} from ${url} is a Git LFS pointer (${file.size} bytes), not a Parquet file. Run git lfs install && git lfs pull in the served repository, then reload.`,
+            );
+          }
+        }
+
+        if (file.size < 100) {
+          throw new Error(`${fileName} from ${url} is too small (${file.size} bytes) to be a Parquet file.`);
+        }
+      }
+
+      function isGitLfsPointerError(error) {
+        return String(error?.message ?? error).includes("Git LFS pointer");
+      }
+
+      async function validateRemoteParquetUrl(url, fileName) {
+        try {
+          const headResponse = await fetch(url, { method: "HEAD" });
+          const remoteSize = Number(headResponse.headers.get("content-length"));
+          if (!headResponse.ok || !Number.isFinite(remoteSize) || remoteSize > 1024) return;
+
+          const response = await fetch(url);
+          if (!response.ok) return;
+          await validateDownloadedParquet(await response.blob(), fileName, url);
+        } catch (error) {
+          if (isGitLfsPointerError(error)) throw error;
+          console.warn(`Could not validate remote ${fileName}:`, error);
+        }
+      }
+
       async function fetchToOPFS(url, fileName) {
         if (!navigator.storage?.getDirectory) {
           throw new Error("OPFS is not available in this browser.");
@@ -673,6 +707,7 @@
           await writable.close();
         }
 
+        await validateDownloadedParquet(await fileHandle.getFile(), fileName, url);
         return fileHandle;
       }
 
@@ -794,12 +829,17 @@
           for (const name of PRE_AGGREGATED_FILES) {
             const handle = await root.getFileHandle(name);
             const file = await handle.getFile();
+            await validateDownloadedParquet(file, name, name);
             if (file.size < 100) return false;
           }
           return true;
         } catch {
           return false;
         }
+      }
+
+      function getPreAggregatedSourceUrl(fileName) {
+        return fileName === "ais_position_points.parquet" ? PRE_AGGREGATED_SOURCE : PRE_AGGREGATED_SHIP_SOURCE;
       }
 
       async function fetchFileToOPFS(url, fileName) {
@@ -816,6 +856,7 @@
           await writable.write(await response.arrayBuffer());
           await writable.close();
         }
+        await validateDownloadedParquet(await fileHandle.getFile(), fileName, url);
         return fileHandle;
       }
 
@@ -825,7 +866,7 @@
 
         for (let i = 0; i < PRE_AGGREGATED_FILES.length; i++) {
           const fileName = PRE_AGGREGATED_FILES[i];
-          const sourceUrl = i === 0 ? PRE_AGGREGATED_SOURCE : PRE_AGGREGATED_SHIP_SOURCE;
+          const sourceUrl = getPreAggregatedSourceUrl(fileName);
           setStatus(`Downloading ${fileName}...`);
           await fetchFileToOPFS(sourceUrl, fileName);
         }
@@ -839,6 +880,7 @@
           const handle = await root.getFileHandle(fileName);
           const file = await handle.getFile();
           console.log(`Loading ${fileName}: ${(file.size / 1024 / 1024).toFixed(1)} MB`);
+          await validateDownloadedParquet(file, fileName, getPreAggregatedSourceUrl(fileName));
           if (file.size < 100) {
             console.warn(`${fileName} too small (${file.size} bytes), deleting corrupted file...`);
             await root.removeEntry(fileName);
@@ -2236,6 +2278,7 @@
                 throw new Error("Pre-aggregated files not available on server");
               }
             } catch (preAggError) {
+              if (isGitLfsPointerError(preAggError)) throw preAggError;
               console.warn("Pre-aggregated files not available, falling back to raw Parquet:", preAggError);
 
               // ── Priority 3: Fall back to raw test.parquet + browser aggregation ──
@@ -2280,9 +2323,11 @@
             await conn.query(`CREATE OR REPLACE VIEW test_parquet AS SELECT * FROM '${OPFS_FILE_NAME}';`);
           }
         } catch (opfsError) {
+          if (isGitLfsPointerError(opfsError)) throw opfsError;
           console.warn("OPFS failed, falling back to remote HTTP:", opfsError);
           dataMode = "remote";
           loadMode = "raw-remote";
+          await validateRemoteParquetUrl(REMOTE_URL, OPFS_FILE_NAME);
           await conn.query(`CREATE OR REPLACE VIEW test_parquet AS SELECT * FROM '${REMOTE_URL}';`);
           await prepareAisSpatialData();
         }
