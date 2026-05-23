@@ -37,7 +37,7 @@ In-Browser DuckDB fetches pre-aggregated Parquet files once and stores them in t
 
 ## Key Features
 
-- **Server-side pre-aggregation** — a 24GB raw Parquet file is pre-processed into ~500MB of aggregated data before the browser ever sees it
+- **Server-side pre-aggregation** — a 24GB raw Parquet file is pre-processed into browser-ready artifacts before the browser ever sees it
 - **OPFS-backed data** — pre-aggregated Parquet files stored in the browser's Origin Private File System; fetch once, query forever with zero server cost
 - **Smart caching** — on each page load, cached files are loaded instantly from OPFS. No expensive in-browser aggregation needed.
 - **50M+ points** rendered smoothly using a 512×512 uniform grid spatial index in Rust
@@ -53,7 +53,7 @@ In-Browser DuckDB fetches pre-aggregated Parquet files once and stores them in t
 
 ## Server-Side Pre-Aggregation
 
-For large datasets (e.g., 24GB with 50M+ rows), the browser cannot efficiently download and aggregate the raw data. Instead, pre-aggregate the data server-side using the provided `aggregate.py` script.
+For large datasets (e.g., 24GB with 100M+ rows), the browser cannot efficiently download and aggregate the raw data. Instead, pre-aggregate the data server-side using the provided `aggregate.py` script.
 
 The script selects a temporal contiguous extract rather than randomly sampling individual rows. It picks a random anchor day, expands backward and forward by whole days while staying below the row budget, then fills the remaining budget hour-by-hour from the selected window edges. This preserves realistic track continuity in `test.parquet`.
 
@@ -72,17 +72,19 @@ python aggregate.py
 python aggregate.py /path/to/large_dataset.parquet /path/to/output/
 
 # Reproducible temporal window and custom position-report budget
-python aggregate.py /path/to/large_dataset.parquet /path/to/output/ --ships 40000000 --seed 1234
+python aggregate.py /path/to/large_dataset.parquet /path/to/output/ --ships 100000000 --seed 1234
 ```
 
 The script produces four files:
 
-| File | Description | Estimated size (40M sample) |
+| File | Description | Reference size (~100M reports) |
 |------|-------------|--------------------------|
-| `test.parquet` | Temporal contiguous extract just under 40M rows, all 18 columns | ~1.8 GB |
-| `density_index.bin` | Prebuilt 512x512 density spatial index for tile rendering | ~320 MB |
-| `ais_latest_positions.parquet` | One row per MMSI with latest position and vessel metadata | ~5-15 MB |
+| `test.parquet` | Temporal contiguous extract, all source columns, Parquet ZSTD compression level 22 | ~1.95 GB |
+| `density_index.bin` | Prebuilt 512x512 binary density spatial index for tile rendering | ~762 MB |
+| `ais_latest_positions.parquet` | One row per MMSI with latest position and vessel metadata | ~2.8 MB |
 | `sample_manifest.json` | Selected window metadata: anchor day, start/end time, row counts, seed | ~KB |
+
+The committed reference artifacts contain `99,662,929` position reports in `test.parquet`. The density index contains `99,662,926` valid Web Mercator points generated from rows in `test.parquet` with valid `LAT`/`LON` values.
 
 ### Schema Requirements
 
@@ -118,6 +120,8 @@ your-server/
 
 The browser will automatically detect and download the pre-aggregated files on first visit, then cache them in OPFS for instant loading on subsequent visits.
 
+`index2.html` is a query-focused companion page. It maps only the latest known report per unique `MMSI` from the SQL query result, caps the table at 100 rows, and defaults the map to 10,000 ships with an adjustable map ship limit.
+
 ### Fallback Behavior
 
 If pre-aggregated files are not available on the server, the app falls back to downloading the raw `test.parquet` file and building the aggregated tables in the browser. This is significantly slower and not recommended for large datasets.
@@ -142,7 +146,7 @@ If pre-aggregated files are not available on the server, the app falls back to d
 
 ### Data Flow
 
-1. **Server-side**: `aggregate.py` reads the raw Parquet file, selects a contiguous temporal extract just under 40M rows into `test.parquet`, then produces `density_index.bin` and `ais_latest_positions.parquet`
+1. **Server-side**: `aggregate.py` reads the raw Parquet file, selects a contiguous temporal extract under the configured row budget into `test.parquet`, writes it with Parquet ZSTD compression level 22, then produces `density_index.bin` and `ais_latest_positions.parquet`
 2. **Browser first visit**: Downloads pre-aggregated files and stores them in OPFS
 3. **Browser subsequent visits**: Loads pre-aggregated files directly from OPFS (instant)
 4. **Single binary-to-WASM transfer** — `density_index.bin` is copied to the Web Worker and loaded directly into WASM with `load_density_index`. No DuckDB materialization or Arrow table is needed for aggregate tiles.
@@ -157,7 +161,7 @@ If pre-aggregated files are not available on the server, the app falls back to d
 
 | Metric | Raw in-browser | Pre-aggregated |
 |--------|---------------|----------------|
-| Download size | 24 GB | ~500 MB |
+| Download size | 24 GB | ~2.7 GB for the 100M-report reference artifacts |
 | First-load time | 5-15 minutes | 30-60 seconds |
 | Browser memory | ~1 GB+ | ~100 MB |
 | Stability | Prone to crashes | Stable |
@@ -221,8 +225,8 @@ ls -lh test.parquet density_index.bin ais_latest_positions.parquet
 Expected sizes are approximately:
 
 ```text
-test.parquet                    912M
-density_index.bin               320M
+test.parquet                    1.9G
+density_index.bin               762M
 ais_latest_positions.parquet    2.8M
 ```
 
@@ -239,7 +243,7 @@ cp target/wasm32-unknown-unknown/release/ducklake_wasm_density.wasm density_engi
 
 ### Run
 
-Serve the project directory with any static file server (e.g., `python -m http.server 8080`) and open `index.html`. The default startup path expects pre-aggregated files (`density_index.bin` and `ais_latest_positions.parquet`) available at the same origin.
+Serve the project directory with any static file server (e.g., `python -m http.server 8080`) and open `index.html`. The default startup path expects pre-aggregated files (`density_index.bin` and `ais_latest_positions.parquet`) available at the same origin. Open `index2.html` for the query-result map that displays latest unique ships from SQL results.
 
 **Server requirements for remote fallback:**
 - Must support HTTP Range requests (`Accept-Ranges: bytes` header)

@@ -1,0 +1,913 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DuckDB-WASM Query Ship Map</title>
+    <link href="https://unpkg.com/maplibre-gl@^3/dist/maplibre-gl.css" rel="stylesheet" />
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+        background: #1f1f1f;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+      }
+
+      body {
+        display: grid;
+        grid-template-rows: auto 1fr;
+        background: #1f1f1f;
+        color: #f5f5f5;
+      }
+
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 12px 16px;
+        border-bottom: 1px solid #343434;
+        background: #151515;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 14px;
+        font-weight: 700;
+      }
+
+      #status,
+      #map-status,
+      #timing {
+        color: #bdbdbd;
+        font-size: 12px;
+      }
+
+      #status {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      main {
+        min-width: 0;
+        min-height: 0;
+        overflow: auto;
+        padding: 16px;
+      }
+
+      .query-panel {
+        display: grid;
+        gap: 12px;
+        max-width: 1200px;
+        margin: 0 auto;
+      }
+
+      .panel-heading,
+      .actions,
+      .map-controls {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+
+      .panel-heading {
+        justify-content: space-between;
+      }
+
+      label {
+        color: #d8d8d8;
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      #map {
+        position: relative;
+        overflow: hidden;
+        width: 100%;
+        min-height: 360px;
+        height: min(50vh, 560px);
+        border: 1px solid #343434;
+        border-radius: 8px;
+        background: #0e1117;
+      }
+
+      #map-renderer,
+      #deck-renderer {
+        position: absolute;
+        inset: 0;
+      }
+
+      #map-renderer {
+        z-index: 1;
+      }
+
+      #deck-renderer {
+        z-index: 2;
+        pointer-events: none;
+      }
+
+      textarea {
+        width: 100%;
+        min-height: 150px;
+        resize: vertical;
+        padding: 12px;
+        border: 1px solid #4a4a4a;
+        border-radius: 8px;
+        outline: none;
+        background: #121212;
+        color: #f5f5f5;
+        font: inherit;
+        line-height: 1.45;
+      }
+
+      textarea:focus,
+      input:focus,
+      select:focus {
+        border-color: #8ab4f8;
+        box-shadow: 0 0 0 2px rgb(138 180 248 / 20%);
+      }
+
+      button,
+      input,
+      select {
+        border: 1px solid #4a4a4a;
+        border-radius: 8px;
+        padding: 9px 12px;
+        background: #121212;
+        color: #f5f5f5;
+        font: inherit;
+      }
+
+      button {
+        border: 0;
+        background: #8ab4f8;
+        color: #101010;
+        cursor: pointer;
+        font-weight: 700;
+      }
+
+      button:disabled {
+        cursor: not-allowed;
+        opacity: 0.55;
+      }
+
+      input[type="number"] {
+        width: 130px;
+      }
+
+      #results {
+        overflow: auto;
+        min-height: 180px;
+        border: 1px solid #343434;
+        border-radius: 8px;
+        background: #121212;
+      }
+
+      .message {
+        margin: 0;
+        padding: 14px;
+        color: #cfcfcf;
+        white-space: pre-wrap;
+      }
+
+      .error {
+        color: #ffb4ab;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12px;
+      }
+
+      th,
+      td {
+        max-width: 480px;
+        padding: 8px 10px;
+        border-bottom: 1px solid #2b2b2b;
+        text-align: left;
+        vertical-align: top;
+        white-space: nowrap;
+      }
+
+      th {
+        position: sticky;
+        top: 0;
+        background: #202020;
+        color: #f0f0f0;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>DuckDB-WASM Query Ship Map</h1>
+      <div id="status">Initializing...</div>
+    </header>
+    <main>
+      <section class="query-panel">
+        <div class="panel-heading">
+          <label>Latest unique ships from query result</label>
+          <div id="map-status">Map is initializing...</div>
+        </div>
+        <div id="map">
+          <div id="map-renderer"></div>
+          <div id="deck-renderer"></div>
+        </div>
+        <div class="map-controls">
+          <label for="map-limit">Map ship limit</label>
+          <input id="map-limit" type="number" min="1" max="100000" step="1000" value="10000" />
+          <select id="map-limit-preset" aria-label="Map ship limit preset">
+            <option value="1000">1,000</option>
+            <option value="5000">5,000</option>
+            <option value="10000" selected>10,000</option>
+            <option value="25000">25,000</option>
+            <option value="50000">50,000</option>
+          </select>
+        </div>
+        <label for="query">Query local OPFS parquet file <code>test.parquet</code></label>
+        <textarea id="query" spellcheck="false">SELECT
+  MMSI,
+  BaseDateTime,
+  LAT,
+  LON,
+  VesselName,
+  VesselType,
+  Status,
+  SOG,
+  COG,
+  Heading
+FROM test_parquet
+WHERE LAT BETWEEN 24 AND 50
+  AND LON BETWEEN -130 AND -60</textarea>
+        <div class="actions">
+          <button id="run" type="button" disabled>Run Query</button>
+          <div id="timing">No query run yet.</div>
+        </div>
+        <div id="results"><p class="message">Initializing...</p></div>
+      </section>
+    </main>
+
+    <script src="https://unpkg.com/maplibre-gl@3/dist/maplibre-gl.js"></script>
+    <script src="https://unpkg.com/deck.gl@8.9.36/dist.min.js"></script>
+
+    <script type="module">
+      const DUCKDB_WASM_VERSION = "1.33.1-dev45.0";
+      const SOURCE_URL = "/test.parquet";
+      const REMOTE_URL = window.location.origin + SOURCE_URL;
+      const OPFS_FILE_NAME = "test.parquet";
+      const ARTIFACT_METADATA_FILE = "artifact_metadata.json";
+      const FORCE_ARTIFACT_REFRESH = new URLSearchParams(window.location.search).has("refresh");
+      const MAX_TABLE_ROWS = 100;
+      const DEFAULT_MAP_SHIP_LIMIT = 10000;
+      const MAX_MAP_SHIP_LIMIT = 100000;
+      const MAP_STYLE_ID = "carto-voyager";
+      const MAP_STYLES = {
+        [MAP_STYLE_ID]: {
+          url: "https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json",
+        },
+      };
+
+      const SHIP_ICONS = (() => {
+        const colors = { slow: [255, 80, 80], fast: [255, 210, 50], medium: [255, 140, 0] };
+        const icons = {};
+        for (const [key, color] of Object.entries(colors)) {
+          const canvas = document.createElement("canvas");
+          canvas.width = 32;
+          canvas.height = 32;
+          const ctx = canvas.getContext("2d");
+          ctx.fillStyle = `rgb(${color.join(",")})`;
+          ctx.beginPath();
+          ctx.moveTo(16, 2);
+          ctx.lineTo(28, 28);
+          ctx.lineTo(16, 22);
+          ctx.lineTo(4, 28);
+          ctx.closePath();
+          ctx.fill();
+          icons[key] = canvas.toDataURL();
+        }
+        return icons;
+      })();
+
+      const status = document.querySelector("#status");
+      const mapStatus = document.querySelector("#map-status");
+      const mapRenderer = document.querySelector("#map-renderer");
+      const deckRenderer = document.querySelector("#deck-renderer");
+      const queryInput = document.querySelector("#query");
+      const runButton = document.querySelector("#run");
+      const timing = document.querySelector("#timing");
+      const results = document.querySelector("#results");
+      const mapLimitInput = document.querySelector("#map-limit");
+      const mapLimitPreset = document.querySelector("#map-limit-preset");
+
+      let conn;
+      let activeRun = 0;
+      let mapLibreMap;
+      let mapDeckOverlay;
+      let deckInstance;
+      let lastQuerySql = "";
+
+      function setStatus(message) {
+        status.textContent = message;
+      }
+
+      function setMapStatus(message) {
+        mapStatus.textContent = message;
+      }
+
+      function setResults(message, className = "message") {
+        results.replaceChildren();
+        const element = document.createElement("p");
+        element.className = className;
+        element.textContent = message;
+        results.append(element);
+      }
+
+      function getMapViewState() {
+        if (!mapLibreMap) return { longitude: -95, latitude: 38, zoom: 3, bearing: 0, pitch: 0 };
+        const center = mapLibreMap.getCenter();
+        return {
+          longitude: center.lng,
+          latitude: center.lat,
+          zoom: mapLibreMap.getZoom(),
+          bearing: mapLibreMap.getBearing(),
+          pitch: mapLibreMap.getPitch(),
+        };
+      }
+
+      function setDeckLayers(layers, props = {}) {
+        if (mapDeckOverlay) {
+          mapDeckOverlay.setProps({ ...props, layers });
+          return;
+        }
+        if (deckInstance) {
+          deckInstance.setProps({ ...props, viewState: getMapViewState(), layers });
+        }
+      }
+
+      function initializeMapRenderer() {
+        const { maplibregl, deck } = window;
+        if (!maplibregl || !deck) throw new Error("MapLibre/deck.gl dependencies did not load.");
+
+        mapLibreMap = new maplibregl.Map({
+          container: mapRenderer,
+          style: MAP_STYLES[MAP_STYLE_ID].url,
+          center: [-95, 38],
+          zoom: 3,
+          attributionControl: true,
+        });
+        mapLibreMap.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+        mapLibreMap.on("error", (event) => {
+          const message = event?.error?.message ?? "Map renderer error.";
+          setMapStatus(message);
+          console.error(event?.error ?? event);
+        });
+
+        if (typeof deck.MapboxOverlay === "function") {
+          mapDeckOverlay = new deck.MapboxOverlay({ interleaved: true, layers: [], getCursor: () => "default" });
+          mapLibreMap.addControl(mapDeckOverlay);
+        } else {
+          deckInstance = new deck.Deck({
+            parent: deckRenderer,
+            controller: false,
+            layers: [],
+            views: [new deck.MapView({ repeat: true })],
+            viewState: getMapViewState(),
+            getCursor: () => "default",
+          });
+        }
+
+        const syncDeckView = () => {
+          if (deckInstance) deckInstance.setProps({ viewState: getMapViewState() });
+        };
+        mapLibreMap.on("move", syncDeckView);
+        new ResizeObserver(() => {
+          if (deckInstance) deckInstance.setProps({ width: deckRenderer.clientWidth, height: deckRenderer.clientHeight });
+          syncDeckView();
+        }).observe(deckRenderer);
+      }
+
+      async function createDatabase(duckdb, progress) {
+        const bundles = duckdb.getJsDelivrBundles();
+        const bundle = await duckdb.selectBundle(bundles);
+        const workerUrl = URL.createObjectURL(new Blob([`importScripts("${bundle.mainWorker}");`], { type: "text/javascript" }));
+        const worker = new Worker(workerUrl);
+        const db = new duckdb.AsyncDuckDB(new duckdb.ConsoleLogger(), worker);
+        await db.instantiate(bundle.mainModule, bundle.pthreadWorker, progress);
+        URL.revokeObjectURL(workerUrl);
+        return db;
+      }
+
+      async function validateDownloadedParquet(file, fileName, url) {
+        if (file.size <= 1024) {
+          const text = await file.text();
+          if (text.startsWith("version https://git-lfs.github.com/spec/v1")) {
+            throw new Error(`${fileName} from ${url} is a Git LFS pointer (${file.size} bytes), not a Parquet file. Run git lfs install && git lfs pull in the served repository, then reload.`);
+          }
+        }
+        if (file.size < 100) throw new Error(`${fileName} from ${url} is too small (${file.size} bytes) to be a Parquet file.`);
+      }
+
+      function isGitLfsPointerError(error) {
+        return String(error?.message ?? error).includes("Git LFS pointer");
+      }
+
+      async function validateRemoteParquetUrl(url, fileName) {
+        try {
+          const headResponse = await fetch(url, { method: "HEAD", cache: "no-store" });
+          const remoteSize = Number(headResponse.headers.get("content-length"));
+          if (!headResponse.ok || !Number.isFinite(remoteSize) || remoteSize > 1024) return;
+          const response = await fetch(url, { cache: "no-store" });
+          if (!response.ok) return;
+          await validateDownloadedParquet(await response.blob(), fileName, url);
+        } catch (error) {
+          if (isGitLfsPointerError(error)) throw error;
+          console.warn(`Could not validate remote ${fileName}:`, error);
+        }
+      }
+
+      async function fetchRemoteArtifactMetadata(url) {
+        const headResponse = await fetch(url, { method: "HEAD", cache: "no-store" });
+        if (!headResponse.ok) return null;
+        return {
+          url,
+          size: headResponse.headers.get("content-length"),
+          modified: headResponse.headers.get("last-modified"),
+          etag: headResponse.headers.get("etag"),
+        };
+      }
+
+      async function getArtifactMetadata() {
+        try {
+          const root = await navigator.storage.getDirectory();
+          const handle = await root.getFileHandle(ARTIFACT_METADATA_FILE);
+          return JSON.parse(await (await handle.getFile()).text());
+        } catch {
+          return {};
+        }
+      }
+
+      async function saveArtifactMetadata(metadata) {
+        const root = await navigator.storage.getDirectory();
+        const handle = await root.getFileHandle(ARTIFACT_METADATA_FILE, { create: true });
+        const writable = await handle.createWritable();
+        await writable.write(JSON.stringify(metadata, null, 2));
+        await writable.close();
+      }
+
+      async function recordArtifactMetadata(fileName, remoteMetadata, localFile) {
+        if (!remoteMetadata) return;
+        const metadata = await getArtifactMetadata();
+        metadata[fileName] = { ...remoteMetadata, localSize: String(localFile.size), savedAt: new Date().toISOString() };
+        await saveArtifactMetadata(metadata);
+      }
+
+      function artifactMetadataMatches(cached, remoteMetadata, localFile) {
+        if (!cached || !remoteMetadata || !localFile) return false;
+        if (cached.url !== remoteMetadata.url) return false;
+        if (cached.localSize !== String(localFile.size)) return false;
+        if (remoteMetadata.size && String(localFile.size) !== remoteMetadata.size) return false;
+        if (cached.size !== remoteMetadata.size) return false;
+        if (remoteMetadata.modified || cached.modified) return cached.modified === remoteMetadata.modified;
+        if (remoteMetadata.etag && cached.etag) return cached.etag === remoteMetadata.etag;
+        return true;
+      }
+
+      function formatBytes(bytes) {
+        const value = Number(bytes);
+        if (!Number.isFinite(value)) return "unknown size";
+        if (value >= 1024 ** 3) return `${(value / 1024 ** 3).toFixed(2)} GiB`;
+        if (value >= 1024 ** 2) return `${(value / 1024 ** 2).toFixed(1)} MiB`;
+        return `${value.toLocaleString()} bytes`;
+      }
+
+      async function getCachedArtifactHandle(url, fileName, expectedLabel = "Parquet file") {
+        if (FORCE_ARTIFACT_REFRESH) return null;
+        const remoteMetadata = await fetchRemoteArtifactMetadata(url);
+        if (!remoteMetadata) return null;
+
+        try {
+          const root = await navigator.storage.getDirectory();
+          const localHandle = await root.getFileHandle(fileName);
+          const localFile = await localHandle.getFile();
+          await validateDownloadedParquet(localFile, fileName, url);
+
+          const metadata = await getArtifactMetadata();
+          const cached = metadata[fileName];
+          if (artifactMetadataMatches(cached, remoteMetadata, localFile)) return localHandle;
+
+          const remoteSize = Number(remoteMetadata.size);
+          if (!cached && Number.isFinite(remoteSize) && localFile.size === remoteSize) {
+            await recordArtifactMetadata(fileName, remoteMetadata, localFile);
+            console.info(`Adopted existing OPFS ${fileName} into artifact metadata cache.`);
+            return localHandle;
+          }
+        } catch (error) {
+          console.info(`No reusable OPFS ${fileName} cache found:`, error);
+        }
+
+        return null;
+      }
+
+      async function withArtifactLock(fileName, callback) {
+        if (navigator.locks?.request) {
+          setStatus(`Waiting for exclusive cache access to ${fileName}...`);
+          return navigator.locks.request(`ducklake-artifact:${fileName}`, callback);
+        }
+        return callback();
+      }
+
+      async function fetchToOPFS(url, fileName) {
+        if (!navigator.storage?.getDirectory) throw new Error("OPFS is not available in this browser.");
+        const remoteMetadata = await fetchRemoteArtifactMetadata(url);
+        const response = await fetch(url, { cache: "no-store" });
+        if (!response.ok) throw new Error(`Failed to fetch ${url}: ${response.status} ${response.statusText}`);
+
+        const root = await navigator.storage.getDirectory();
+        const fileHandle = await root.getFileHandle(fileName, { create: true });
+        const writable = await fileHandle.createWritable();
+        if (response.body) {
+          await response.body.pipeTo(writable);
+        } else {
+          await writable.write(await response.arrayBuffer());
+          await writable.close();
+        }
+
+        const localFile = await fileHandle.getFile();
+        await validateDownloadedParquet(localFile, fileName, url);
+        await recordArtifactMetadata(fileName, remoteMetadata, localFile);
+        return fileHandle;
+      }
+
+      async function ensureArtifactInOPFS(url, fileName, expectedLabel = "Parquet file", downloadingMessage = null) {
+        return withArtifactLock(fileName, async () => {
+          const cachedHandle = await getCachedArtifactHandle(url, fileName, expectedLabel);
+          if (cachedHandle) {
+            const cachedFile = await cachedHandle.getFile();
+            setStatus(`Using cached ${fileName} from OPFS (${formatBytes(cachedFile.size)}).`);
+            return cachedHandle;
+          }
+
+          setStatus(downloadingMessage || `Downloading latest ${fileName} to OPFS...`);
+          const fileHandle = await fetchToOPFS(url, fileName);
+          const downloadedFile = await fileHandle.getFile();
+          setStatus(`Downloaded ${fileName} to OPFS (${formatBytes(downloadedFile.size)}).`);
+          return fileHandle;
+        });
+      }
+
+      function stringifyCell(value) {
+        if (value === null || value === undefined) return "";
+        if (typeof value === "bigint") return value.toString();
+        if (value instanceof Date) return value.toISOString();
+        if (value instanceof Uint8Array) return `[${value.length} bytes]`;
+        if (typeof value === "object") {
+          return JSON.stringify(value, (_key, nestedValue) => (typeof nestedValue === "bigint" ? nestedValue.toString() : nestedValue));
+        }
+        return String(value);
+      }
+
+      function rowToObject(row, fields) {
+        if (typeof row?.toJSON === "function") return row.toJSON();
+        return Object.fromEntries(fields.map((field, index) => [field.name, row[field.name] ?? row[index]]));
+      }
+
+      function tableToObjects(table, fields, limit = Infinity) {
+        const boundedTable = Number.isFinite(limit) && typeof table.slice === "function" ? table.slice(0, limit) : table;
+        return boundedTable.toArray().slice(0, limit).map((row) => rowToObject(row, fields));
+      }
+
+      function normalizeFieldName(name) {
+        return name.toLowerCase().replace(/[^a-z0-9]/g, "");
+      }
+
+      function quoteIdentifier(name) {
+        return `"${String(name).replaceAll('"', '""')}"`;
+      }
+
+      function stripTrailingSemicolon(sql) {
+        return sql.trim().replace(/;+\s*$/, "");
+      }
+
+      function getMapShipLimit() {
+        const value = Number(mapLimitInput.value);
+        if (!Number.isFinite(value) || value < 1) return DEFAULT_MAP_SHIP_LIMIT;
+        return Math.min(MAX_MAP_SHIP_LIMIT, Math.max(1, Math.floor(value)));
+      }
+
+      function findRequiredFields(fields) {
+        const byName = new Map(fields.map((field) => [normalizeFieldName(field.name), field]));
+        const required = {
+          mmsi: byName.get("mmsi"),
+          time: byName.get("basedatetime"),
+          latitude: byName.get("lat") ?? byName.get("latitude"),
+          longitude: byName.get("lon") ?? byName.get("lng") ?? byName.get("longitude"),
+        };
+        const missing = Object.entries(required).filter(([, field]) => !field).map(([key]) => key);
+        if (missing.length > 0) {
+          throw new Error("Unique ship map mode requires MMSI, BaseDateTime, LAT, and LON in the query result.");
+        }
+        return required;
+      }
+
+      function findOptionalFields(fields) {
+        const byName = new Map(fields.map((field) => [normalizeFieldName(field.name), field]));
+        return {
+          name: byName.get("vesselname") ?? byName.get("name"),
+          shipType: byName.get("vesseltype") ?? byName.get("shiptype"),
+          status: byName.get("status") ?? byName.get("navigationstatus"),
+          speed: byName.get("sog") ?? byName.get("speedoverground"),
+          course: byName.get("cog") ?? byName.get("courseoverground"),
+          heading: byName.get("heading"),
+        };
+      }
+
+      async function inspectQuery(sql) {
+        const table = await conn.query(`SELECT * FROM (${sql}) AS query_result LIMIT 0;`);
+        return table.schema.fields;
+      }
+
+      function buildLatestShipQueries(sql, fields, limit) {
+        const required = findRequiredFields(fields);
+        const optional = findOptionalFields(fields);
+        const originalSelect = fields.map((field) => `query_result.${quoteIdentifier(field.name)}`).join(",\n          ");
+        const q = Object.fromEntries(Object.entries(required).map(([key, field]) => [key, `query_result.${quoteIdentifier(field.name)}`]));
+        const opt = Object.fromEntries(
+          Object.entries(optional).map(([key, field]) => [key, field ? `query_result.${quoteIdentifier(field.name)}` : null]),
+        );
+        const validPredicate = `
+          ${q.mmsi} IS NOT NULL
+          AND ${q.time} IS NOT NULL
+          AND ${q.latitude} IS NOT NULL
+          AND ${q.longitude} IS NOT NULL
+          AND TRY_CAST(${q.latitude} AS DOUBLE) BETWEEN -90 AND 90
+          AND TRY_CAST(${q.longitude} AS DOUBLE) BETWEEN -180 AND 180
+        `;
+
+        const countSql = `
+          WITH query_result AS (
+            ${sql}
+          )
+          SELECT
+            count(*) AS report_count,
+            count(DISTINCT CAST(${q.mmsi} AS VARCHAR)) AS unique_ship_count,
+            count(DISTINCT CASE WHEN ${validPredicate} THEN CAST(${q.mmsi} AS VARCHAR) ELSE NULL END) AS mappable_ship_count
+          FROM query_result;
+        `;
+
+        const latestSql = `
+          WITH query_result AS (
+            ${sql}
+          ),
+          ranked AS (
+            SELECT
+              ${originalSelect},
+              CAST(${q.mmsi} AS VARCHAR) AS __map_mmsi,
+              TRY_CAST(${q.latitude} AS DOUBLE) AS __map_latitude,
+              TRY_CAST(${q.longitude} AS DOUBLE) AS __map_longitude,
+              CAST(extract(epoch from ${q.time}) AS BIGINT) AS __map_position_time,
+              ${opt.name ? `CAST(${opt.name} AS VARCHAR)` : "NULL"} AS __map_name,
+              ${opt.shipType ? `CAST(${opt.shipType} AS VARCHAR)` : "NULL"} AS __map_ship_type,
+              ${opt.status ? `CAST(${opt.status} AS VARCHAR)` : "NULL"} AS __map_status,
+              ${opt.speed ? `TRY_CAST(${opt.speed} AS DOUBLE)` : "NULL"} AS __map_speed,
+              ${opt.course ? `TRY_CAST(${opt.course} AS DOUBLE)` : "NULL"} AS __map_course,
+              ${opt.heading ? `TRY_CAST(${opt.heading} AS DOUBLE)` : "NULL"} AS __map_heading,
+              row_number() OVER (PARTITION BY CAST(${q.mmsi} AS VARCHAR) ORDER BY ${q.time} DESC NULLS LAST) AS __ship_rank
+            FROM query_result
+            WHERE ${validPredicate}
+          )
+          SELECT * EXCLUDE (__ship_rank)
+          FROM ranked
+          WHERE __ship_rank = 1
+          ORDER BY __map_position_time DESC NULLS LAST
+          LIMIT ${limit};
+        `;
+
+        return { countSql, latestSql };
+      }
+
+      function getShipIcon(row) {
+        const speed = Number(row.__map_speed);
+        if (!Number.isFinite(speed) || speed < 10) return SHIP_ICONS.slow;
+        if (speed <= 20) return SHIP_ICONS.medium;
+        return SHIP_ICONS.fast;
+      }
+
+      function getShipAngle(row) {
+        const heading = Number(row.__map_heading);
+        if (Number.isFinite(heading) && heading >= 0 && heading < 360) return Math.round(heading / 30) * 30;
+        const course = Number(row.__map_course);
+        if (Number.isFinite(course) && course >= 0 && course < 360) return Math.round(course / 30) * 30;
+        return 0;
+      }
+
+      function renderShipMap(rows, counts, limit) {
+        const displayRows = rows.filter((row) => Number.isFinite(Number(row.__map_latitude)) && Number.isFinite(Number(row.__map_longitude)));
+        if (displayRows.length === 0) {
+          setDeckLayers([]);
+          setMapStatus("No valid ship coordinates found in the latest report query result.");
+          return;
+        }
+
+        setDeckLayers(
+          [
+            new window.deck.IconLayer({
+              id: "query-latest-ship-icons",
+              data: displayRows,
+              getIcon: (row) => ({ url: getShipIcon(row), width: 32, height: 32, mask: false, anchorX: 16, anchorY: 16 }),
+              getPosition: (row) => [Number(row.__map_longitude), Number(row.__map_latitude)],
+              getSize: (row) => {
+                const speed = Number(row.__map_speed);
+                return Number.isFinite(speed) && speed > 1 ? 14 : 11;
+              },
+              getAngle: getShipAngle,
+              sizeScale: 1,
+              sizeUnits: "pixels",
+              sizeMinPixels: 8,
+              sizeMaxPixels: 20,
+              opacity: 0.9,
+              pickable: true,
+            }),
+          ],
+          {
+            getTooltip: ({ object }) => {
+              if (!object) return null;
+              return {
+                text: [
+                  object.__map_name || `MMSI ${object.__map_mmsi}`,
+                  `MMSI: ${object.__map_mmsi}`,
+                  `Ship type: ${object.__map_ship_type || "unknown"}`,
+                  `Status: ${object.__map_status || "unknown"}`,
+                  `Speed: ${stringifyCell(object.__map_speed) || "unknown"}`,
+                ].join("\n"),
+              };
+            },
+          },
+        );
+
+        const bounds = new window.maplibregl.LngLatBounds();
+        for (const row of displayRows) bounds.extend([Number(row.__map_longitude), Number(row.__map_latitude)]);
+        if (!bounds.isEmpty()) mapLibreMap.fitBounds(bounds, { padding: 48, maxZoom: 12, duration: 500 });
+
+        const clipped = Number(counts.mappable_ship_count) > displayRows.length;
+        setMapStatus(
+          `Query matched ${Number(counts.report_count).toLocaleString()} reports across ${Number(counts.unique_ship_count).toLocaleString()} unique ships. ${Number(counts.mappable_ship_count).toLocaleString()} ships have valid mappable reports. ${clipped ? "Only " : ""}Displaying latest reports for ${displayRows.length.toLocaleString()} ship${displayRows.length === 1 ? "" : "s"} on the map${clipped ? ` due to the ${limit.toLocaleString()} ship limit` : ""}.`,
+        );
+      }
+
+      function renderTable(queryResult, counts, limit) {
+        if (queryResult.rowCount === 0) {
+          setResults("Query completed with no latest ship rows to display.");
+          return;
+        }
+
+        const fields = queryResult.fields.filter((field) => !field.name.startsWith("__map_"));
+        const visibleRows = queryResult.rows.slice(0, MAX_TABLE_ROWS);
+        const resultTable = document.createElement("table");
+        const thead = document.createElement("thead");
+        const tbody = document.createElement("tbody");
+        const headerRow = document.createElement("tr");
+
+        for (const field of fields) {
+          const th = document.createElement("th");
+          th.textContent = field.name;
+          headerRow.append(th);
+        }
+        thead.append(headerRow);
+
+        for (const row of visibleRows) {
+          const tr = document.createElement("tr");
+          for (const field of fields) {
+            const td = document.createElement("td");
+            td.textContent = stringifyCell(row[field.name]);
+            tr.append(td);
+          }
+          tbody.append(tr);
+        }
+
+        const message = document.createElement("p");
+        message.className = "message";
+        message.textContent = `Table shows first ${Math.min(MAX_TABLE_ROWS, queryResult.rowCount).toLocaleString()} latest-ship rows. Map displays ${queryResult.rowCount.toLocaleString()} of ${Number(counts.mappable_ship_count).toLocaleString()} mappable ships with current limit ${limit.toLocaleString()}.`;
+        resultTable.append(thead, tbody);
+        results.replaceChildren(message, resultTable);
+      }
+
+      function getQueryResult(table) {
+        const fields = table.schema.fields;
+        const rowCount = table.numRows ?? table.length ?? 0;
+        const rows = tableToObjects(table, fields, Infinity);
+        return { fields, rows, rowCount };
+      }
+
+      async function runQuery() {
+        const sql = stripTrailingSemicolon(queryInput.value);
+        if (!sql || !conn) return;
+
+        const runId = ++activeRun;
+        const limit = getMapShipLimit();
+        lastQuerySql = sql;
+        mapLimitInput.value = String(limit);
+        runButton.disabled = true;
+        timing.textContent = "Running query...";
+        setResults("Running query...");
+        setMapStatus("Running latest-ship query...");
+
+        const startedAt = performance.now();
+        try {
+          const fields = await inspectQuery(sql);
+          const { countSql, latestSql } = buildLatestShipQueries(sql, fields, limit);
+          const countTable = await conn.query(countSql);
+          const countRows = tableToObjects(countTable, countTable.schema.fields, 1);
+          const counts = countRows[0] ?? { report_count: 0, unique_ship_count: 0, mappable_ship_count: 0 };
+          const table = await conn.query(latestSql);
+          const elapsedMs = performance.now() - startedAt;
+          if (runId !== activeRun) return;
+
+          const queryResult = getQueryResult(table);
+          timing.textContent = `Query executed in ${elapsedMs.toFixed(2)} ms.`;
+          renderTable(queryResult, counts, limit);
+          renderShipMap(queryResult.rows, counts, limit);
+        } catch (error) {
+          const elapsedMs = performance.now() - startedAt;
+          if (runId !== activeRun) return;
+          console.error(error);
+          timing.textContent = `Query failed after ${elapsedMs.toFixed(2)} ms.`;
+          setResults(error?.message ?? String(error), "message error");
+          setMapStatus(error?.message ?? String(error));
+          setDeckLayers([]);
+        } finally {
+          if (runId === activeRun) runButton.disabled = false;
+        }
+      }
+
+      mapLimitPreset.addEventListener("change", () => {
+        mapLimitInput.value = mapLimitPreset.value;
+        if (lastQuerySql) setMapStatus("Map ship limit changed. Run the query again to update the map.");
+      });
+
+      mapLimitInput.addEventListener("change", () => {
+        const limit = getMapShipLimit();
+        mapLimitInput.value = String(limit);
+        const matchingOption = [...mapLimitPreset.options].find((option) => Number(option.value) === limit);
+        if (matchingOption) mapLimitPreset.value = matchingOption.value;
+        if (lastQuerySql) setMapStatus("Map ship limit changed. Run the query again to update the map.");
+      });
+
+      runButton.addEventListener("click", runQuery);
+      queryInput.addEventListener("keydown", (event) => {
+        if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+          event.preventDefault();
+          runQuery();
+        }
+      });
+
+      try {
+        initializeMapRenderer();
+        const duckdb = await import(`https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@${DUCKDB_WASM_VERSION}/+esm`);
+        const db = await createDatabase(duckdb, (progress) => {
+          if (progress?.bytesLoaded && progress?.bytesTotal) {
+            setStatus(`Loading DuckDB-WASM ${Math.round((progress.bytesLoaded / progress.bytesTotal) * 100)}%...`);
+          }
+        });
+        conn = await db.connect();
+
+        let fileHandle = null;
+        try {
+          if (!navigator.storage?.getDirectory) throw new Error("OPFS is not available in this browser.");
+          fileHandle = await ensureArtifactInOPFS(SOURCE_URL, OPFS_FILE_NAME, "Parquet file", `Downloading latest ${OPFS_FILE_NAME} to OPFS...`);
+          await db.registerFileHandle(OPFS_FILE_NAME, fileHandle, duckdb.DuckDBDataProtocol.BROWSER_FSACCESS, true);
+          await conn.query(`CREATE OR REPLACE VIEW test_parquet AS SELECT * FROM '${OPFS_FILE_NAME}';`);
+          setStatus(`${OPFS_FILE_NAME} ready from OPFS (${formatBytes((await fileHandle.getFile()).size)}).`);
+        } catch (opfsError) {
+          if (isGitLfsPointerError(opfsError)) throw opfsError;
+          console.warn("OPFS failed, falling back to remote HTTP:", opfsError);
+          await validateRemoteParquetUrl(REMOTE_URL, OPFS_FILE_NAME);
+          await conn.query(`CREATE OR REPLACE VIEW test_parquet AS SELECT * FROM '${REMOTE_URL}';`);
+          setStatus(`Running from remote ${REMOTE_URL}; data not cached locally.`);
+        }
+
+        window.duckdbWasm = db;
+        if (fileHandle) window.testParquetOPFSHandle = fileHandle;
+        runButton.disabled = false;
+        setResults("Ready. Run the default query or enter SQL that returns MMSI, BaseDateTime, LAT, and LON.");
+        setMapStatus("Run a query to display latest unique ship positions on the map.");
+      } catch (error) {
+        console.error(error);
+        setStatus("Failed to initialize DuckDB-WASM. See the browser console for details.");
+        setResults(error?.message ?? String(error), "message error");
+        setMapStatus(error?.message ?? String(error));
+      }
+    </script>
+  </body>
+</html>

@@ -741,32 +741,57 @@
         if (cached.localSize !== String(localFile.size)) return false;
         if (remoteMetadata.size && String(localFile.size) !== remoteMetadata.size) return false;
         if (cached.size !== remoteMetadata.size) return false;
-        if (cached.modified !== remoteMetadata.modified) return false;
-        if (cached.etag !== remoteMetadata.etag) return false;
+        if (remoteMetadata.modified || cached.modified) return cached.modified === remoteMetadata.modified;
+        if (remoteMetadata.etag && cached.etag) return cached.etag === remoteMetadata.etag;
         return true;
       }
 
-      async function artifactNeedsUpdate(url, fileName) {
-        if (FORCE_ARTIFACT_REFRESH) return true;
+      function formatBytes(bytes) {
+        const value = Number(bytes);
+        if (!Number.isFinite(value)) return "unknown size";
+        if (value >= 1024 ** 3) return `${(value / 1024 ** 3).toFixed(2)} GiB`;
+        if (value >= 1024 ** 2) return `${(value / 1024 ** 2).toFixed(1)} MiB`;
+        return `${value.toLocaleString()} bytes`;
+      }
+
+      async function getCachedArtifactHandle(url, fileName, expectedLabel = "data file") {
+        if (FORCE_ARTIFACT_REFRESH) return null;
+        const remoteMetadata = await fetchRemoteArtifactMetadata(url);
+        if (!remoteMetadata) return null;
 
         try {
-          const remoteMetadata = await fetchRemoteArtifactMetadata(url);
-          if (!remoteMetadata) return true;
-
           const root = await navigator.storage.getDirectory();
-          try {
-            const localHandle = await root.getFileHandle(fileName);
-            const localFile = await localHandle.getFile();
-            const metadata = await getArtifactMetadata();
+          const localHandle = await root.getFileHandle(fileName);
+          const localFile = await localHandle.getFile();
+          await validateDownloadedFile(localFile, fileName, url, expectedLabel);
 
-            return !artifactMetadataMatches(metadata[fileName], remoteMetadata, localFile);
-          } catch {
-            return true;
+          const metadata = await getArtifactMetadata();
+          const cached = metadata[fileName];
+          if (artifactMetadataMatches(cached, remoteMetadata, localFile)) return localHandle;
+
+          const remoteSize = Number(remoteMetadata.size);
+          if (!cached && Number.isFinite(remoteSize) && localFile.size === remoteSize) {
+            await recordArtifactMetadata(fileName, remoteMetadata, localFile);
+            console.info(`Adopted existing OPFS ${fileName} into artifact metadata cache.`);
+            return localHandle;
           }
         } catch (error) {
-          console.warn("Metadata check failed, downloading file:", error);
-          return true;
+          console.info(`No reusable OPFS ${fileName} cache found:`, error);
         }
+
+        return null;
+      }
+
+      async function withArtifactLock(fileName, callback) {
+        if (navigator.locks?.request) {
+          setStatus(`Waiting for exclusive cache access to ${fileName}...`);
+          return navigator.locks.request(`ducklake-artifact:${fileName}`, callback);
+        }
+        return callback();
+      }
+
+      async function artifactNeedsUpdate(url, fileName) {
+        return !(await getCachedArtifactHandle(url, fileName, fileName.endsWith(".parquet") ? "Parquet file" : "data file"));
       }
 
       async function fetchToOPFS(url, fileName) {
@@ -925,15 +950,30 @@
         return fileHandle;
       }
 
+      async function ensureArtifactInOPFS(url, fileName, expectedLabel = "data file", downloadingMessage = null) {
+        return withArtifactLock(fileName, async () => {
+          const cachedHandle = await getCachedArtifactHandle(url, fileName, expectedLabel);
+          if (cachedHandle) {
+            const cachedFile = await cachedHandle.getFile();
+            setStatus(`Using cached ${fileName} from OPFS (${formatBytes(cachedFile.size)}).`);
+            return cachedHandle;
+          }
+
+          setStatus(downloadingMessage || `Downloading latest ${fileName} to OPFS...`);
+          const fileHandle = await fetchFileToOPFS(url, fileName);
+          const downloadedFile = await fileHandle.getFile();
+          setStatus(`Downloaded ${fileName} to OPFS (${formatBytes(downloadedFile.size)}).`);
+          return fileHandle;
+        });
+      }
+
       async function downloadPreAggregatedFiles() {
         setStatus("Downloading pre-aggregated AIS data...");
-        const root = await navigator.storage.getDirectory();
 
         for (let i = 0; i < PRE_AGGREGATED_FILES.length; i++) {
           const fileName = PRE_AGGREGATED_FILES[i];
           const sourceUrl = getPreAggregatedSourceUrl(fileName);
-          setStatus(`Downloading ${fileName}...`);
-          await fetchFileToOPFS(sourceUrl, fileName);
+          await ensureArtifactInOPFS(sourceUrl, fileName, fileName.endsWith(".parquet") ? "Parquet file" : "data file", `Downloading ${fileName}...`);
         }
       }
 
@@ -2373,15 +2413,7 @@
 
               // ── Priority 3: Fall back to raw test.parquet + browser aggregation ──
               loadMode = "raw-browser-build";
-              setStatus(`Checking local cache for ${OPFS_FILE_NAME}...`);
-              const shouldUpdate = await needsOPFSUpdate(SOURCE_URL, OPFS_FILE_NAME);
-
-              if (shouldUpdate) {
-                setStatus(`Downloading ${SOURCE_URL} to OPFS...`);
-                fileHandle = await fetchToOPFS(SOURCE_URL, OPFS_FILE_NAME);
-              } else {
-                fileHandle = await root.getFileHandle(OPFS_FILE_NAME);
-              }
+              fileHandle = await ensureArtifactInOPFS(SOURCE_URL, OPFS_FILE_NAME, "Parquet file", `Downloading ${SOURCE_URL} to OPFS...`);
 
               await db.registerFileHandle(OPFS_FILE_NAME, fileHandle, duckdb.DuckDBDataProtocol.BROWSER_FSACCESS, true);
               await conn.query(`CREATE OR REPLACE VIEW test_parquet AS SELECT * FROM '${OPFS_FILE_NAME}';`);
@@ -2402,12 +2434,7 @@
 
           // ── Download test.parquet to OPFS if not already present (for ad-hoc queries and track lookups) ──
           if (loadMode.startsWith("pre-aggregated")) {
-            if (await artifactNeedsUpdate(SOURCE_URL, OPFS_FILE_NAME)) {
-              setStatus(`Downloading latest ${OPFS_FILE_NAME} to OPFS for ad-hoc queries...`);
-              fileHandle = await fetchToOPFS(SOURCE_URL, OPFS_FILE_NAME);
-            } else {
-              fileHandle = await root.getFileHandle(OPFS_FILE_NAME);
-            }
+            fileHandle = await ensureArtifactInOPFS(SOURCE_URL, OPFS_FILE_NAME, "Parquet file", `Downloading latest ${OPFS_FILE_NAME} to OPFS for ad-hoc queries...`);
             await db.registerFileHandle(OPFS_FILE_NAME, fileHandle, duckdb.DuckDBDataProtocol.BROWSER_FSACCESS, true);
             await conn.query(`CREATE OR REPLACE VIEW test_parquet AS SELECT * FROM '${OPFS_FILE_NAME}';`);
           }

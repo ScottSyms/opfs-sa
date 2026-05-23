@@ -3,17 +3,18 @@
 Pre-aggregate AIS data for browser consumption.
 
 This script reads a large AIS Parquet file, selects a temporal contiguous sample
-just under 40M position reports into test.parquet, then builds pre-aggregated files that the
-browser can load quickly:
+under the configured position-report budget into test.parquet, then builds pre-aggregated files
+that the browser can load quickly. The reference artifacts use --ships 100000000 and write
+test.parquet with Parquet ZSTD compression level 22:
 
-  - test.parquet                    (~2GB):  temporal sample, all 18 columns
-  - density_index.bin               (~320MB): Prebuilt density spatial index
-  - ais_latest_positions.parquet    (~5-15MB): One row per MMSI with latest position
+  - test.parquet                    (~1.9GB): temporal sample, all source columns, ZSTD level 22
+  - density_index.bin               (~762MB): Prebuilt density spatial index
+  - ais_latest_positions.parquet    (~3MB):   One row per MMSI with latest position
   - sample_manifest.json            metadata for the selected temporal window
 
 Usage:
     python aggregate.py [source.parquet] [output_dir]
-    python aggregate.py [source.parquet] [output_dir] --ships 40000000 --seed 1234
+    python aggregate.py [source.parquet] [output_dir] --ships 100000000 --seed 1234
 
 Defaults:
     source.parquet = ~/code/data/mc/mcdec/parquet/ais_2024.parquet
