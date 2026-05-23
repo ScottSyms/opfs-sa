@@ -6,6 +6,9 @@ use std::sync::{Mutex, OnceLock};
 
 const MERCATOR_MAX_LATITUDE: f64 = 85.051_128_78;
 const GRID_RESOLUTION: u32 = 512;
+const DENSITY_INDEX_MAGIC: &[u8; 8] = b"DLAISIDX";
+const DENSITY_INDEX_VERSION: u32 = 1;
+const DENSITY_INDEX_HEADER_LEN: usize = 32;
 
 #[derive(Default)]
 struct PointStore {
@@ -119,6 +122,102 @@ pub extern "C" fn load_points(lat_ptr: *const f64, lon_ptr: *const f64, len: usi
     points.cell_starts = cell_starts;
     points.cell_counts = cell_counts;
     count
+}
+
+#[no_mangle]
+pub extern "C" fn load_density_index(ptr: *const u8, len: usize) -> usize {
+    if ptr.is_null() || len == 0 {
+        let mut points = point_store().lock().unwrap();
+        points.x.clear();
+        points.y.clear();
+        points.cell_starts.clear();
+        points.cell_counts.clear();
+        return 0;
+    }
+
+    let bytes = unsafe { slice::from_raw_parts(ptr, len) };
+    let grid_size = (GRID_RESOLUTION * GRID_RESOLUTION) as usize;
+    let cell_starts_len = grid_size + 1;
+    let cell_starts_bytes = match cell_starts_len.checked_mul(mem::size_of::<u32>()) {
+        Some(value) => value,
+        None => return 0,
+    };
+    let xy_offset = match DENSITY_INDEX_HEADER_LEN.checked_add(cell_starts_bytes) {
+        Some(value) => value,
+        None => return 0,
+    };
+
+    if len < xy_offset || &bytes[0..8] != DENSITY_INDEX_MAGIC {
+        return 0;
+    }
+
+    let version = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+    let grid_resolution = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
+    let point_count_u64 = u64::from_le_bytes(bytes[16..24].try_into().unwrap());
+    if version != DENSITY_INDEX_VERSION
+        || grid_resolution != GRID_RESOLUTION
+        || point_count_u64 > u32::MAX as u64
+        || point_count_u64 > usize::MAX as u64
+    {
+        return 0;
+    }
+
+    let point_count = point_count_u64 as usize;
+    let xy_bytes = match point_count.checked_mul(mem::size_of::<f32>() * 2) {
+        Some(value) => value,
+        None => return 0,
+    };
+    let expected_len = match xy_offset.checked_add(xy_bytes) {
+        Some(value) => value,
+        None => return 0,
+    };
+    if len != expected_len {
+        return 0;
+    }
+
+    let mut cell_starts = Vec::with_capacity(cell_starts_len);
+    let mut previous = 0_u32;
+    for index in 0..cell_starts_len {
+        let offset = DENSITY_INDEX_HEADER_LEN + index * mem::size_of::<u32>();
+        let start = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        if start < previous || start as usize > point_count {
+            return 0;
+        }
+        cell_starts.push(start);
+        previous = start;
+    }
+    if cell_starts[grid_size] as usize != point_count {
+        return 0;
+    }
+
+    let mut cell_counts = Vec::with_capacity(grid_size);
+    for index in 0..grid_size {
+        cell_counts.push(cell_starts[index + 1] - cell_starts[index]);
+    }
+
+    let mut x = Vec::with_capacity(point_count);
+    let mut y = Vec::with_capacity(point_count);
+    for index in 0..point_count {
+        let offset = xy_offset + index * mem::size_of::<f32>() * 2;
+        let point_x = f32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        let point_y = f32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap());
+        if !point_x.is_finite()
+            || !point_y.is_finite()
+            || !(0.0..=1.0).contains(&point_x)
+            || !(0.0..=1.0).contains(&point_y)
+        {
+            return 0;
+        }
+        x.push(point_x);
+        y.push(point_y);
+    }
+
+    let mut points = point_store().lock().unwrap();
+    points.x = x;
+    points.y = y;
+    points.cell_starts = cell_starts;
+    points.cell_counts = cell_counts;
+    point_count
 }
 
 #[no_mangle]

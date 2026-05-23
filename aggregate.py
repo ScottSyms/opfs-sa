@@ -7,7 +7,7 @@ just under 40M position reports into test.parquet, then builds pre-aggregated fi
 browser can load quickly:
 
   - test.parquet                    (~2GB):  temporal sample, all 18 columns
-  - ais_position_points.parquet     (~600MB): All valid lat/lon positions
+  - density_index.bin               (~320MB): Prebuilt density spatial index
   - ais_latest_positions.parquet    (~5-15MB): One row per MMSI with latest position
   - sample_manifest.json            metadata for the selected temporal window
 
@@ -23,14 +23,19 @@ Requires: duckdb (pip install duckdb)
 """
 
 import argparse
+from array import array
 import json
 import random
+import struct
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 DEFAULT_TARGET_ROWS = 40_000_000
 MERCATOR_MAX_LATITUDE = 85.05112878
+GRID_RESOLUTION = 512
+DENSITY_INDEX_MAGIC = b"DLAISIDX"
+DENSITY_INDEX_VERSION = 1
 DEFAULT_SOURCE_PATH = Path.home() / "code/data/mc/mcdec/parquet/ais_2024.parquet"
 
 
@@ -219,7 +224,95 @@ def choose_temporal_window(hourly_counts, daily_counts, target_rows, seed):
     }
 
 
-def write_manifest(output_dir, source_path, selection, sample_count, test_size, pos_count, ship_count):
+def write_density_index(con, test_output, output_dir):
+    density_output = output_dir / "density_index.bin"
+    grid_size = GRID_RESOLUTION * GRID_RESOLUTION
+
+    con.execute(f"""
+        CREATE OR REPLACE TEMP TABLE density_points AS
+        WITH projected AS (
+            SELECT
+                ((CAST(LON AS DOUBLE) + 180.0) / 360.0) AS raw_x,
+                ((1.0 - (ln(tan(radians(CAST(LAT AS DOUBLE))) + (1.0 / cos(radians(CAST(LAT AS DOUBLE))))) / 3.141592653589793)) / 2.0) AS raw_y
+            FROM '{sql_path(test_output)}'
+            WHERE LAT BETWEEN {-MERCATOR_MAX_LATITUDE} AND {MERCATOR_MAX_LATITUDE}
+              AND LON BETWEEN -180 AND 180
+        ),
+        clamped AS (
+            SELECT
+                LEAST(1.0, GREATEST(0.0, raw_x)) AS x,
+                LEAST(1.0, GREATEST(0.0, raw_y)) AS y
+            FROM projected
+            WHERE isfinite(raw_x) AND isfinite(raw_y)
+        )
+        SELECT
+            CAST(LEAST({GRID_RESOLUTION - 1}, GREATEST(0, floor(x * {GRID_RESOLUTION}))) AS INTEGER)
+              + CAST(LEAST({GRID_RESOLUTION - 1}, GREATEST(0, floor(y * {GRID_RESOLUTION}))) AS INTEGER) * {GRID_RESOLUTION} AS cell_index,
+            CAST(x AS FLOAT) AS x,
+            CAST(y AS FLOAT) AS y
+        FROM clamped;
+    """)
+
+    point_count = con.execute("SELECT count(*) FROM density_points;").fetchone()[0]
+    if point_count > 0xFFFF_FFFF:
+        raise RuntimeError(f"Density index supports at most {0xFFFF_FFFF:,} points, got {point_count:,}")
+
+    cell_counts = [0] * grid_size
+    for cell_index, count in con.execute("SELECT cell_index, count(*) FROM density_points GROUP BY cell_index;").fetchall():
+        cell_counts[int(cell_index)] = int(count)
+
+    cell_starts = [0] * (grid_size + 1)
+    running = 0
+    for index, count in enumerate(cell_counts):
+        cell_starts[index] = running
+        running += count
+    cell_starts[grid_size] = running
+
+    if running != point_count:
+        raise RuntimeError(f"Density index count mismatch: cells={running:,}, points={point_count:,}")
+
+    header = struct.pack(
+        "<8sIIQQ",
+        DENSITY_INDEX_MAGIC,
+        DENSITY_INDEX_VERSION,
+        GRID_RESOLUTION,
+        point_count,
+        0,
+    )
+    starts = array("I", cell_starts)
+    if sys.byteorder != "little":
+        starts.byteswap()
+
+    pair = struct.Struct("<ff")
+    written = 0
+    last_cell = -1
+    with density_output.open("wb") as file:
+        file.write(header)
+        starts.tofile(file)
+
+        cursor = con.execute("SELECT cell_index, x, y FROM density_points ORDER BY cell_index;")
+        while True:
+            rows = cursor.fetchmany(250_000)
+            if not rows:
+                break
+            buffer = bytearray(len(rows) * pair.size)
+            for offset, (cell_index, x, y) in enumerate(rows):
+                cell_index = int(cell_index)
+                if cell_index < last_cell:
+                    raise RuntimeError("Density points were not sorted by cell_index")
+                last_cell = cell_index
+                pair.pack_into(buffer, offset * pair.size, float(x), float(y))
+            file.write(buffer)
+            written += len(rows)
+
+    if written != point_count:
+        raise RuntimeError(f"Density index write mismatch: wrote={written:,}, expected={point_count:,}")
+
+    density_size = density_output.stat().st_size / (1024 * 1024)
+    return density_output, point_count, density_size
+
+
+def write_manifest(output_dir, source_path, selection, sample_count, test_size, density_count, density_size, ship_count):
     manifest = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "source_path": str(source_path),
@@ -235,10 +328,13 @@ def write_manifest(output_dir, source_path, selection, sample_count, test_size, 
         "selected_extra_hours": [hour.isoformat() for hour in sorted(selection["selected_hours"])],
         "skipped_days": selection["skipped_days"],
         "skipped_hours": selection["skipped_hours"],
-        "test_parquet_mb": test_size,
-        "valid_position_count": pos_count,
+        "density_grid_resolution": GRID_RESOLUTION,
+        "density_index_file_mb": density_size,
+        "density_index_format_version": DENSITY_INDEX_VERSION,
+        "density_index_point_count": density_count,
         "latest_ship_count": ship_count,
         "seed": selection["seed"],
+        "test_parquet_mb": test_size,
     }
 
     manifest_output = output_dir / "sample_manifest.json"
@@ -279,7 +375,7 @@ def main():
             WHERE BaseDateTime >= TIMESTAMPTZ '{sql_utc_timestamp(selection['start_time'])}'
               AND BaseDateTime < TIMESTAMPTZ '{sql_utc_timestamp(selection['end_time'])}'
             ORDER BY BaseDateTime
-        ) TO '{sql_path(test_output)}' (FORMAT PARQUET);
+        ) TO '{sql_path(test_output)}' (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 22, ROW_GROUP_SIZE 2000000);
     """)
     sample_count = con.execute(f"SELECT count(*) FROM '{sql_path(test_output)}';").fetchone()[0]
     if sample_count != selection["selected_count"]:
@@ -287,25 +383,11 @@ def main():
     test_size = test_output.stat().st_size / (1024 * 1024)
     print(f"      Written {sample_count:,} rows to {test_output} ({test_size:.1f} MB)")
 
-    # -- 1. ais_position_points --------------------------------------------
-    print(f"[3/4] Creating ais_position_points from test.parquet...")
-    con.execute(f"""
-        CREATE OR REPLACE TABLE ais_position_points AS
-        SELECT
-            CAST(LAT AS DOUBLE) AS latitude,
-            CAST(LON AS DOUBLE) AS longitude
-        FROM '{sql_path(test_output)}'
-        WHERE LAT BETWEEN {-MERCATOR_MAX_LATITUDE} AND {MERCATOR_MAX_LATITUDE}
-          AND LON BETWEEN -180 AND 180
-    """)
-
-    pos_count = con.execute("SELECT count(*) FROM ais_position_points").fetchone()[0]
-    print(f"      {pos_count:,} position points")
-
-    pos_output = output_dir / "ais_position_points.parquet"
-    con.execute(f"COPY ais_position_points TO '{sql_path(pos_output)}' (FORMAT PARQUET);")
-    pos_size = pos_output.stat().st_size / (1024 * 1024)
-    print(f"      Written to {pos_output} ({pos_size:.1f} MB)")
+    # -- 1. density_index.bin ----------------------------------------------
+    print(f"[3/4] Creating density_index.bin from test.parquet...")
+    density_output, density_count, density_size = write_density_index(con, test_output, output_dir)
+    print(f"      {density_count:,} density points")
+    print(f"      Written to {density_output} ({density_size:.1f} MB)")
 
     # -- 2. ais_latest_positions -------------------------------------------
     print(f"[4/4] Creating ais_latest_positions from test.parquet...")
@@ -356,10 +438,10 @@ def main():
     ship_size = ship_output.stat().st_size / (1024 * 1024)
     print(f"      Written to {ship_output} ({ship_size:.1f} MB)")
 
-    manifest_output = write_manifest(output_dir, source_path, selection, sample_count, test_size, pos_count, ship_count)
+    manifest_output = write_manifest(output_dir, source_path, selection, sample_count, test_size, density_count, density_size, ship_count)
 
     # -- Summary -------------------------------------------------------------
-    total_size = test_size + pos_size + ship_size
+    total_size = test_size + density_size + ship_size
     source_size = source_path.stat().st_size / (1024 * 1024)
     print(f"\nDone!")
     print(f"  Source:      {source_path} ({source_size:.0f} MB)")
@@ -368,7 +450,7 @@ def main():
     print(f"  Manifest:    {manifest_output}")
     print(f"\nServe these files alongside index.html:")
     print(f"  {test_output}")
-    print(f"  {pos_output}")
+    print(f"  {density_output}")
     print(f"  {ship_output}")
     print(f"  {manifest_output}")
 

@@ -343,9 +343,12 @@
       const SOURCE_URL = "/test.parquet";
       const REMOTE_URL = window.location.origin + SOURCE_URL;
       const OPFS_FILE_NAME = "test.parquet";
-      const PRE_AGGREGATED_FILES = ["ais_position_points.parquet", "ais_latest_positions.parquet"];
-      const PRE_AGGREGATED_SOURCE = "/ais_position_points.parquet";
+      const DENSITY_INDEX_FILE = "density_index.bin";
+      const DENSITY_INDEX_SOURCE = "/density_index.bin";
+      const PRE_AGGREGATED_FILES = [DENSITY_INDEX_FILE, "ais_latest_positions.parquet"];
       const PRE_AGGREGATED_SHIP_SOURCE = "/ais_latest_positions.parquet";
+      const ARTIFACT_METADATA_FILE = "artifact_metadata.json";
+      const FORCE_ARTIFACT_REFRESH = new URLSearchParams(window.location.search).has("refresh");
       const SHIP_ICONS = (() => {
         const colors = { slow: [255, 80, 80], fast: [255, 210, 50], medium: [255, 140, 0] };
         const icons = {};
@@ -653,19 +656,23 @@
         return db;
       }
 
-      async function validateDownloadedParquet(file, fileName, url) {
+      async function validateDownloadedFile(file, fileName, url, expectedLabel = "data file") {
         if (file.size <= 1024) {
           const text = await file.text();
           if (text.startsWith("version https://git-lfs.github.com/spec/v1")) {
             throw new Error(
-              `${fileName} from ${url} is a Git LFS pointer (${file.size} bytes), not a Parquet file. Run git lfs install && git lfs pull in the served repository, then reload.`,
+              `${fileName} from ${url} is a Git LFS pointer (${file.size} bytes), not a ${expectedLabel}. Run git lfs install && git lfs pull in the served repository, then reload.`,
             );
           }
         }
 
         if (file.size < 100) {
-          throw new Error(`${fileName} from ${url} is too small (${file.size} bytes) to be a Parquet file.`);
+          throw new Error(`${fileName} from ${url} is too small (${file.size} bytes) to be a ${expectedLabel}.`);
         }
+      }
+
+      async function validateDownloadedParquet(file, fileName, url) {
+        await validateDownloadedFile(file, fileName, url, "Parquet file");
       }
 
       function isGitLfsPointerError(error) {
@@ -674,11 +681,11 @@
 
       async function validateRemoteParquetUrl(url, fileName) {
         try {
-          const headResponse = await fetch(url, { method: "HEAD" });
+          const headResponse = await fetch(url, { method: "HEAD", cache: "no-store" });
           const remoteSize = Number(headResponse.headers.get("content-length"));
           if (!headResponse.ok || !Number.isFinite(remoteSize) || remoteSize > 1024) return;
 
-          const response = await fetch(url);
+          const response = await fetch(url, { cache: "no-store" });
           if (!response.ok) return;
           await validateDownloadedParquet(await response.blob(), fileName, url);
         } catch (error) {
@@ -687,12 +694,88 @@
         }
       }
 
+      async function fetchRemoteArtifactMetadata(url) {
+        const headResponse = await fetch(url, { method: "HEAD", cache: "no-store" });
+        if (!headResponse.ok) return null;
+        return {
+          url,
+          size: headResponse.headers.get("content-length"),
+          modified: headResponse.headers.get("last-modified"),
+          etag: headResponse.headers.get("etag"),
+        };
+      }
+
+      async function getArtifactMetadata() {
+        try {
+          const root = await navigator.storage.getDirectory();
+          const handle = await root.getFileHandle(ARTIFACT_METADATA_FILE);
+          const file = await handle.getFile();
+          return JSON.parse(await file.text());
+        } catch {
+          return {};
+        }
+      }
+
+      async function saveArtifactMetadata(metadata) {
+        const root = await navigator.storage.getDirectory();
+        const handle = await root.getFileHandle(ARTIFACT_METADATA_FILE, { create: true });
+        const writable = await handle.createWritable();
+        await writable.write(JSON.stringify(metadata, null, 2));
+        await writable.close();
+      }
+
+      async function recordArtifactMetadata(fileName, remoteMetadata, localFile) {
+        if (!remoteMetadata) return;
+        const metadata = await getArtifactMetadata();
+        metadata[fileName] = {
+          ...remoteMetadata,
+          localSize: String(localFile.size),
+          savedAt: new Date().toISOString(),
+        };
+        await saveArtifactMetadata(metadata);
+      }
+
+      function artifactMetadataMatches(cached, remoteMetadata, localFile) {
+        if (!cached || !remoteMetadata || !localFile) return false;
+        if (cached.url !== remoteMetadata.url) return false;
+        if (cached.localSize !== String(localFile.size)) return false;
+        if (remoteMetadata.size && String(localFile.size) !== remoteMetadata.size) return false;
+        if (cached.size !== remoteMetadata.size) return false;
+        if (cached.modified !== remoteMetadata.modified) return false;
+        if (cached.etag !== remoteMetadata.etag) return false;
+        return true;
+      }
+
+      async function artifactNeedsUpdate(url, fileName) {
+        if (FORCE_ARTIFACT_REFRESH) return true;
+
+        try {
+          const remoteMetadata = await fetchRemoteArtifactMetadata(url);
+          if (!remoteMetadata) return true;
+
+          const root = await navigator.storage.getDirectory();
+          try {
+            const localHandle = await root.getFileHandle(fileName);
+            const localFile = await localHandle.getFile();
+            const metadata = await getArtifactMetadata();
+
+            return !artifactMetadataMatches(metadata[fileName], remoteMetadata, localFile);
+          } catch {
+            return true;
+          }
+        } catch (error) {
+          console.warn("Metadata check failed, downloading file:", error);
+          return true;
+        }
+      }
+
       async function fetchToOPFS(url, fileName) {
         if (!navigator.storage?.getDirectory) {
           throw new Error("OPFS is not available in this browser.");
         }
 
-        const response = await fetch(url);
+        const remoteMetadata = await fetchRemoteArtifactMetadata(url);
+        const response = await fetch(url, { cache: "no-store" });
         if (!response.ok) {
           throw new Error(`Failed to fetch ${url}: ${response.status} ${response.statusText}`);
         }
@@ -707,37 +790,14 @@
           await writable.close();
         }
 
-        await validateDownloadedParquet(await fileHandle.getFile(), fileName, url);
+        const localFile = await fileHandle.getFile();
+        await validateDownloadedParquet(localFile, fileName, url);
+        await recordArtifactMetadata(fileName, remoteMetadata, localFile);
         return fileHandle;
       }
 
       async function needsOPFSUpdate(url, fileName) {
-        try {
-          const headResponse = await fetch(url, { method: "HEAD" });
-          if (!headResponse.ok) return true;
-
-          const remoteSize = headResponse.headers.get("content-length");
-          const remoteModified = headResponse.headers.get("last-modified");
-
-          const root = await navigator.storage.getDirectory();
-          try {
-            const localHandle = await root.getFileHandle(fileName);
-            const localFile = await localHandle.getFile();
-
-            if (remoteSize && localFile.size !== Number(remoteSize)) return true;
-            if (remoteModified) {
-              const remoteDate = new Date(remoteModified).getTime();
-              if (Math.abs(remoteDate - localFile.lastModified) > 1000) return true;
-            }
-
-            return false;
-          } catch {
-            return true;
-          }
-        } catch (error) {
-          console.warn("Metadata check failed, downloading file:", error);
-          return true;
-        }
+        return artifactNeedsUpdate(url, fileName);
       }
 
       const CACHED_TABLES = ["ais_position_points", "ais_latest_positions"];
@@ -764,6 +824,7 @@
       }
 
       async function tablesAreCached(conn, sourceMetadata) {
+        if (!sourceMetadata) return false;
         const cached = await getCachedTableMetadata();
         if (!cached) return false;
         if (cached.sourceSize !== sourceMetadata.size) return false;
@@ -827,9 +888,10 @@
         try {
           const root = await navigator.storage.getDirectory();
           for (const name of PRE_AGGREGATED_FILES) {
+            if (await artifactNeedsUpdate(getPreAggregatedSourceUrl(name), name)) return false;
             const handle = await root.getFileHandle(name);
             const file = await handle.getFile();
-            await validateDownloadedParquet(file, name, name);
+            await validateDownloadedFile(file, name, name, name.endsWith(".parquet") ? "Parquet file" : "data file");
             if (file.size < 100) return false;
           }
           return true;
@@ -839,11 +901,12 @@
       }
 
       function getPreAggregatedSourceUrl(fileName) {
-        return fileName === "ais_position_points.parquet" ? PRE_AGGREGATED_SOURCE : PRE_AGGREGATED_SHIP_SOURCE;
+        return fileName === DENSITY_INDEX_FILE ? DENSITY_INDEX_SOURCE : PRE_AGGREGATED_SHIP_SOURCE;
       }
 
       async function fetchFileToOPFS(url, fileName) {
-        const response = await fetch(url);
+        const remoteMetadata = await fetchRemoteArtifactMetadata(url);
+        const response = await fetch(url, { cache: "no-store" });
         if (!response.ok) {
           throw new Error(`Failed to fetch ${url}: ${response.status} ${response.statusText}`);
         }
@@ -856,7 +919,9 @@
           await writable.write(await response.arrayBuffer());
           await writable.close();
         }
-        await validateDownloadedParquet(await fileHandle.getFile(), fileName, url);
+        const localFile = await fileHandle.getFile();
+        await validateDownloadedFile(localFile, fileName, url, fileName.endsWith(".parquet") ? "Parquet file" : "data file");
+        await recordArtifactMetadata(fileName, remoteMetadata, localFile);
         return fileHandle;
       }
 
@@ -880,26 +945,29 @@
           const handle = await root.getFileHandle(fileName);
           const file = await handle.getFile();
           console.log(`Loading ${fileName}: ${(file.size / 1024 / 1024).toFixed(1)} MB`);
-          await validateDownloadedParquet(file, fileName, getPreAggregatedSourceUrl(fileName));
+          await validateDownloadedFile(file, fileName, getPreAggregatedSourceUrl(fileName), fileName.endsWith(".parquet") ? "Parquet file" : "data file");
           if (file.size < 100) {
             console.warn(`${fileName} too small (${file.size} bytes), deleting corrupted file...`);
             await root.removeEntry(fileName);
             throw new Error(`${fileName} corrupted (too small), needs re-download`);
           }
+
+          if (fileName === DENSITY_INDEX_FILE) {
+            await loadDensityIndexIntoWasm(await file.arrayBuffer());
+            continue;
+          }
+
           await db.registerFileHandle(fileName, handle, duckdb.DuckDBDataProtocol.BROWSER_FSACCESS, true);
           const tableName = fileName.replace(".parquet", "");
           await conn.query(`CREATE OR REPLACE TABLE ${tableName} AS SELECT * FROM '${fileName}';`);
         }
+
+        aisSpatialReady = true;
       }
 
       async function getSourceMetadata(url) {
         try {
-          const headResponse = await fetch(url, { method: "HEAD" });
-          if (!headResponse.ok) return null;
-          return {
-            size: headResponse.headers.get("content-length"),
-            modified: headResponse.headers.get("last-modified"),
-          };
+          return await fetchRemoteArtifactMetadata(url);
         } catch {
           return null;
         }
@@ -988,8 +1056,30 @@
         return values;
       }
 
+      async function loadDensityIndexIntoWasm(densityIndexBuffer) {
+        await initDensityWorker();
+        setStatus("Loading prebuilt AIS density index into Rust/WASM engine...");
+
+        const loadPromise = new Promise((resolve, reject) => {
+          const handler = (event) => {
+            if (event.data.type === "load_density_index_complete") {
+              densityWorker.removeEventListener("message", handler);
+              if (event.data.success) {
+                validPositionReportCount = Number(event.data.count);
+                resolve();
+              } else {
+                reject(new Error(event.data.error || "Worker load_density_index failed"));
+              }
+            }
+          };
+          densityWorker.addEventListener("message", handler);
+          densityWorker.postMessage({ type: "load_density_index", densityIndex: densityIndexBuffer }, [densityIndexBuffer]);
+        });
+
+        await loadPromise;
+      }
+
       async function loadDensityPointsIntoWasm() {
-        if (!densityWasmExports) await createDensityWasmEngine();
         await initDensityWorker();
 
         setStatus("Loading AIS coordinates into Rust/WASM density engine...");
@@ -2267,10 +2357,10 @@
           } else {
             // ── Priority 2: Download pre-aggregated files from server ───────
             try {
-              const posHead = await fetch(PRE_AGGREGATED_SOURCE, { method: "HEAD" });
-              const shipHead = await fetch(PRE_AGGREGATED_SHIP_SOURCE, { method: "HEAD" });
+              const densityHead = await fetch(DENSITY_INDEX_SOURCE, { method: "HEAD", cache: "no-store" });
+              const shipHead = await fetch(PRE_AGGREGATED_SHIP_SOURCE, { method: "HEAD", cache: "no-store" });
 
-              if (posHead.ok && shipHead.ok) {
+              if (densityHead.ok && shipHead.ok) {
                 await downloadPreAggregatedFiles();
                 await loadPreAggregatedFiles(db, duckdb);
                 loadMode = "pre-aggregated-downloaded";
@@ -2312,12 +2402,11 @@
 
           // ── Download test.parquet to OPFS if not already present (for ad-hoc queries and track lookups) ──
           if (loadMode.startsWith("pre-aggregated")) {
-            try {
-              const existingHandle = await root.getFileHandle(OPFS_FILE_NAME);
-              fileHandle = existingHandle;
-            } catch {
-              setStatus(`Downloading ${OPFS_FILE_NAME} to OPFS for ad-hoc queries...`);
+            if (await artifactNeedsUpdate(SOURCE_URL, OPFS_FILE_NAME)) {
+              setStatus(`Downloading latest ${OPFS_FILE_NAME} to OPFS for ad-hoc queries...`);
               fileHandle = await fetchToOPFS(SOURCE_URL, OPFS_FILE_NAME);
+            } else {
+              fileHandle = await root.getFileHandle(OPFS_FILE_NAME);
             }
             await db.registerFileHandle(OPFS_FILE_NAME, fileHandle, duckdb.DuckDBDataProtocol.BROWSER_FSACCESS, true);
             await conn.query(`CREATE OR REPLACE VIEW test_parquet AS SELECT * FROM '${OPFS_FILE_NAME}';`);
@@ -2335,12 +2424,14 @@
         const countTable = await conn.query("SELECT count(*) AS ship_count FROM ais_latest_positions;");
         const countRows = tableToObjects(countTable, countTable.schema.fields, 1);
         latestShipCount = Number(countRows[0]?.ship_count ?? 0);
-        const reportCountTable = await conn.query("SELECT count(*) AS report_count FROM ais_position_points;");
-        const reportCountRows = tableToObjects(reportCountTable, reportCountTable.schema.fields, 1);
-        validPositionReportCount = Number(reportCountRows[0]?.report_count ?? 0);
 
-        await loadDensityPointsIntoWasm();
-        aisSpatialReady = true;
+        if (!aisSpatialReady) {
+          const reportCountTable = await conn.query("SELECT count(*) AS report_count FROM ais_position_points;");
+          const reportCountRows = tableToObjects(reportCountTable, reportCountTable.schema.fields, 1);
+          validPositionReportCount = Number(reportCountRows[0]?.report_count ?? 0);
+          await loadDensityPointsIntoWasm();
+          aisSpatialReady = true;
+        }
 
         window.duckdbWasm = db;
         if (fileHandle) window.testParquetOPFSHandle = fileHandle;

@@ -59,6 +59,41 @@ self.onmessage = async function (event) {
     return;
   }
 
+  if (type === "load_density_index") {
+    if (!wasmExports) {
+      self.postMessage({ type: "load_density_index_complete", success: false, error: "WASM not initialized" });
+      return;
+    }
+
+    let indexPtr = 0;
+    let byteLength = 0;
+    try {
+      const { densityIndex } = event.data;
+      byteLength = densityIndex.byteLength;
+      indexPtr = wasmExports.alloc_bytes(byteLength);
+
+      if (!indexPtr) {
+        throw new Error(`Failed to allocate ${byteLength} bytes in WASM memory`);
+      }
+
+      new Uint8Array(wasmExports.memory.buffer, indexPtr, byteLength).set(new Uint8Array(densityIndex));
+      const loadedCount = wasmExports.load_density_index(indexPtr, byteLength);
+      if (!loadedCount) {
+        throw new Error("Density index validation failed");
+      }
+
+      pointsLoaded = true;
+      self.postMessage({ type: "load_density_index_complete", success: true, count: loadedCount });
+    } catch (error) {
+      self.postMessage({ type: "load_density_index_complete", success: false, error: error.message });
+    } finally {
+      if (indexPtr && byteLength) {
+        wasmExports.dealloc_bytes(indexPtr, byteLength);
+      }
+    }
+    return;
+  }
+
   if (type === "render_tile") {
     if (!wasmExports) {
       self.postMessage({ type: "tile_ready", success: false, error: "WASM not initialized", key: event.data.key });

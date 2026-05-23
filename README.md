@@ -80,7 +80,7 @@ The script produces four files:
 | File | Description | Estimated size (40M sample) |
 |------|-------------|--------------------------|
 | `test.parquet` | Temporal contiguous extract just under 40M rows, all 18 columns | ~1.8 GB |
-| `ais_position_points.parquet` | All valid lat/lon positions within Mercator bounds | ~600 MB |
+| `density_index.bin` | Prebuilt 512x512 density spatial index for tile rendering | ~320 MB |
 | `ais_latest_positions.parquet` | One row per MMSI with latest position and vessel metadata | ~5-15 MB |
 | `sample_manifest.json` | Selected window metadata: anchor day, start/end time, row counts, seed | ~KB |
 
@@ -111,7 +111,7 @@ your-server/
 ├── density_engine.wasm
 ├── density_worker.js
 ├── test.parquet                   ← sampled raw data
-├── ais_position_points.parquet    ← pre-aggregated
+├── density_index.bin              ← prebuilt density index
 ├── ais_latest_positions.parquet   ← pre-aggregated
 └── sample_manifest.json           ← selected window metadata
 ```
@@ -126,8 +126,8 @@ If pre-aggregated files are not available on the server, the app falls back to d
 
 ### Rust WASM Density Engine (`src/lib.rs`)
 
-- Loads latitude/longitude columns into WASM memory once
-- Builds a uniform grid spatial index during `load_points`
+- Loads a prebuilt binary density index with `load_density_index`
+- Keeps `load_points` as the raw-browser fallback path
 - `render_tile(z, x, y, size)` queries only relevant spatial cells instead of iterating all points
 - Outputs RGBA pixel data for 512×512 tiles
 - Hardcoded color ramp (purple → pink → red → orange → yellow)
@@ -142,11 +142,11 @@ If pre-aggregated files are not available on the server, the app falls back to d
 
 ### Data Flow
 
-1. **Server-side**: `aggregate.py` reads the raw Parquet file, selects a contiguous temporal extract just under 40M rows into `test.parquet`, then produces `ais_position_points.parquet` and `ais_latest_positions.parquet`
+1. **Server-side**: `aggregate.py` reads the raw Parquet file, selects a contiguous temporal extract just under 40M rows into `test.parquet`, then produces `density_index.bin` and `ais_latest_positions.parquet`
 2. **Browser first visit**: Downloads pre-aggregated files and stores them in OPFS
 3. **Browser subsequent visits**: Loads pre-aggregated files directly from OPFS (instant)
-4. **Single Arrow-to-WASM transfer** — `SELECT latitude, longitude FROM ais_position_points` produces one Arrow table. The two columns are copied into `Float64Array`s, transferred (zero-copy via `Transferable`) to the Web Worker, and loaded into WASM memory via `load_points`. This happens exactly once.
-5. WASM builds a 512×512 uniform grid spatial index on that single copy of points
+4. **Single binary-to-WASM transfer** — `density_index.bin` is copied to the Web Worker and loaded directly into WASM with `load_density_index`. No DuckDB materialization or Arrow table is needed for aggregate tiles.
+5. The binary index already contains normalized Web Mercator coordinates sorted into a 512×512 uniform grid
 6. All subsequent tile rendering reads exclusively from the in-WASM `PointStore` — no more Arrow tables, no more DuckDB queries, no more JS allocations
 7. On pan/zoom, visible tile coordinates calculated
 8. Tile render requests sent to Web Worker
@@ -203,7 +203,7 @@ No need to install anything globally. The shell is isolated and reproducible —
 
 ### Fresh Clone With Git LFS
 
-The Parquet files are tracked with Git LFS. A normal clone without LFS hydration leaves small text pointer files in place of real Parquet data, which causes DuckDB errors such as `No magic bytes found at end of file 'test.parquet'`.
+The large data artifacts are tracked with Git LFS. A normal clone without LFS hydration leaves small text pointer files in place of real payloads, which causes errors such as `No magic bytes found at end of file 'test.parquet'`.
 
 After cloning, run:
 
@@ -212,17 +212,17 @@ git lfs install
 git lfs pull
 ```
 
-Verify that the files are real Parquet payloads, not 100-byte LFS pointers:
+Verify that the files are real payloads, not 100-byte LFS pointers:
 
 ```bash
-ls -lh test.parquet ais_position_points.parquet ais_latest_positions.parquet
+ls -lh test.parquet density_index.bin ais_latest_positions.parquet
 ```
 
 Expected sizes are approximately:
 
 ```text
 test.parquet                    912M
-ais_position_points.parquet     300M
+density_index.bin               320M
 ais_latest_positions.parquet    2.8M
 ```
 
@@ -239,7 +239,7 @@ cp target/wasm32-unknown-unknown/release/ducklake_wasm_density.wasm density_engi
 
 ### Run
 
-Serve the project directory with any static file server (e.g., `python -m http.server 8080`) and open `index.html`. The default query expects pre-aggregated files (`ais_position_points.parquet` and `ais_latest_positions.parquet`) available at the same origin.
+Serve the project directory with any static file server (e.g., `python -m http.server 8080`) and open `index.html`. The default startup path expects pre-aggregated files (`density_index.bin` and `ais_latest_positions.parquet`) available at the same origin.
 
 **Server requirements for remote fallback:**
 - Must support HTTP Range requests (`Accept-Ranges: bytes` header)
