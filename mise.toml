@@ -1,0 +1,24 @@
+[tools]
+duckdb = "latest"
+rclone = "latest"
+node = "latest"
+pnpm = "latest"
+python = "3.11"
+rust = "latest"
+
+[env]
+GREET = "mise"
+
+[tasks.hello]
+run = "echo 'This is the COP tool'"
+
+[tasks.enterShell]
+depends = ["hello"]
+run = "git --version"
+
+[tasks.enterTest]
+run = """
+echo "Running tests"
+git lfs install
+git --version
+"""
